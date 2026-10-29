@@ -1,45 +1,30 @@
+
 import os
 import sqlite3
 import logging
-from threading import Thread
 from flask import Flask
+from threading import Thread
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters
 )
 
+TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DB_PATH = os.getenv("DB_PATH", "donate.db")
+
 logging.basicConfig(level=logging.INFO)
-TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
-DB_PATH = os.getenv("DB_PATH", "donate_orders.db")
-OWNER_URL = "https://t.me/crmp_feliks"
-DISCOUNT_URL = "https://t.me/qelzee"
-VERSION = "2.0.0"
+log = logging.getLogger(__name__)
 
-# Цены указаны пользователем. Цена в БС согласуется с владельцем.
-VEHICLES = [
-    ("Mustang Hoonigan", 150, 100),
-    ("Квадроцикл", 300, 200),
-    ("Лимузин", 150, 100),
-    ("GAZ 2402 Halloween", 100, 50),
-    ("BMW M5 CS", 250, 200),
-    ("Marussia B1", 150, 100),
-    ("Mercedes-AMG E63 S Wagon", 200, 150),
-    ("Lamborghini Countach", 230, 150),
-    ("Mercedes-Benz AMG Project One", 150, 150),
-    ("BMW M5 F90 ППС", 200, 150),
-    ("Porsche Spyder", 200, 200),
-    ("SSG 033", 200, 150),
-]
+app_web = Flask(__name__)
 
-web = Flask(__name__)
-
-@web.get("/")
-def health():
-    return "FELIKS RUSSIA DONATE is running", 200
+@app_web.route("/")
+def home():
+    return "FELIKS RUSSIA DONATE: online"
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -47,408 +32,438 @@ def db():
     return conn
 
 def init_db():
-    with db() as conn:
-        conn.execute("""
+    with db() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                name TEXT NOT NULL,
+                price TEXT NOT NULL DEFAULT 'Уточнить',
+                description TEXT DEFAULT '',
+                photo TEXT DEFAULT '',
+                active INTEGER DEFAULT 1
+            )
+        """)
+        c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
+                user_id INTEGER,
                 username TEXT,
-                nickname TEXT NOT NULL,
-                product TEXT NOT NULL,
-                price_rub INTEGER NOT NULL,
-                price_stars INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                product TEXT,
+                status TEXT DEFAULT 'Новая'
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS vehicle_photos (
-                vehicle_index INTEGER PRIMARY KEY,
-                file_id TEXT NOT NULL
-            )
-        """)
+        count = c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        if count == 0:
+            vehicles = [
+                ("Транспорт", "Mustang Hoonigan", "150 ₽ / 100 ⭐"),
+                ("Транспорт", "Квадроцикл", "300 ₽ / 200 ⭐"),
+                ("Транспорт", "Лимузин", "150 ₽ / 100 ⭐"),
+                ("Транспорт", "GAZ 2402 Halloween", "100 ₽ / 50 ⭐"),
+                ("Транспорт", "BMW M5 CS", "250 ₽ / 200 ⭐"),
+                ("Транспорт", "Marussia B1", "150 ₽ / 100 ⭐"),
+                ("Транспорт", "Mercedes-AMG E63 S Wagon", "200 ₽ / 150 ⭐"),
+                ("Транспорт", "Lamborghini Countach", "230 ₽ / 150 ⭐"),
+                ("Транспорт", "Mercedes-Benz AMG Project One", "150 ₽ / 150 ⭐"),
+                ("Транспорт", "BMW M5 F90 ППС", "200 ₽ / 150 ⭐"),
+                ("Транспорт", "Porsche Spyder", "200 ₽ / 200 ⭐"),
+                ("Транспорт", "SSG 033", "200 ₽ / 150 ⭐"),
+            ]
+            skins = [
+                ("Скины", "София", "150 ₽"),
+                ("Скины", "Лео", "230 ₽"),
+                ("Скины", "Хиш Мил", "129 ₽"),
+                ("Скины", "Максимка", "349 ₽"),
+            ]
+            for category, name, price in vehicles + skins:
+                c.execute(
+                    "INSERT INTO products(category,name,price) VALUES(?,?,?)",
+                    (category, name, price)
+                )
 
-def main_keyboard():
-    return ReplyKeyboardMarkup(
-        [["🚘 Каталог ТС"], ["📦 Мои заказы", "🎁 Скидки"], ["ℹ️ Помощь"]],
-        resize_keyboard=True
-    )
+def is_admin(update: Update) -> bool:
+    return bool(update.effective_user and update.effective_user.id == ADMIN_ID)
 
-def admin_order_keyboard(order_id):
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{order_id}"),
-        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")
-    ]])
+def main_menu():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🚘 Транспорт"), KeyboardButton("👕 Скины")],
+        [KeyboardButton("💰 Покупка вирты"), KeyboardButton("🎁 Скидки")],
+        [KeyboardButton("📦 Мои заказы"), KeyboardButton("ℹ️ Помощь")]
+    ], resize_keyboard=True)
 
-def payment_keyboard(order_id):
+def admin_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Оплата картой", callback_data=f"paycard:{order_id}")],
-        [InlineKeyboardButton("⭐ Оплата звёздами", callback_data=f"paystars:{order_id}")],
-        [InlineKeyboardButton("💰 Оплата БС", callback_data=f"paybs:{order_id}")],
-        [InlineKeyboardButton("⬅️ В каталог", callback_data="catalog")]
+        [InlineKeyboardButton("📦 Все товары", callback_data="admin:products")],
+        [InlineKeyboardButton("➕ Добавить товар", callback_data="admin:add")],
+        [InlineKeyboardButton("✏️ Изменить товар", callback_data="admin:editlist")],
+        [InlineKeyboardButton("🖼 Изменить фото", callback_data="admin:photolist")],
+        [InlineKeyboardButton("🗑 Удалить товар", callback_data="admin:deletelist")],
+        [InlineKeyboardButton("📋 Заказы", callback_data="admin:orders")],
+        [InlineKeyboardButton("❌ Закрыть", callback_data="admin:close")]
     ])
 
-def vehicle_keyboard(index):
-    next_index = (index + 1) % len(VEHICLES)
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒 Заказать ТС", callback_data=f"order:{index}")],
-        [InlineKeyboardButton("➡️ Следующее ТС", callback_data=f"vehicle:{next_index}")],
-        [InlineKeyboardButton("📋 Весь каталог", callback_data="catalog")]
-    ])
-
-def photo_for_vehicle(index):
-    with db() as conn:
-        row = conn.execute(
-            "SELECT file_id FROM vehicle_photos WHERE vehicle_index=?", (index,)
-        ).fetchone()
-    return row["file_id"] if row else None
-
-async def send_vehicle(chat_id, context, index):
-    name, rub, stars = VEHICLES[index]
-    caption = (
-        f"🚘 {name}\n\n"
-        f"💵 Цена: {rub} ₽\n"
-        f"⭐ Цена: {stars} звёзд\n\n"
-        "Нажми «Заказать ТС», чтобы оформить заявку."
-    )
-    photo = photo_for_vehicle(index)
-    if photo:
-        await context.bot.send_photo(
-            chat_id=chat_id, photo=photo, caption=caption,
-            reply_markup=vehicle_keyboard(index)
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=caption + "\n\n📸 Фото для этой карточки ещё не добавлено.",
-            reply_markup=vehicle_keyboard(index)
-        )
-
-async def show_catalog(chat_id, context):
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="🚘 Каталог FELIKS RUSSIA DONATE\nКаждый транспорт отправляется отдельной карточкой."
-    )
-    for index in range(len(VEHICLES)):
-        await send_vehicle(chat_id, context, index)
+def product_keyboard(category):
+    with db() as c:
+        products = c.execute(
+            "SELECT * FROM products WHERE category=? AND active=1 ORDER BY id",
+            (category,)
+        ).fetchall()
+    rows = [
+        [InlineKeyboardButton(
+            f"{p['name']} — {p['price']}",
+            callback_data=f"product:{p['id']}"
+        )]
+        for p in products
+    ]
+    return InlineKeyboardMarkup(rows) if rows else None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("action", None)
+    context.user_data.pop("product_id", None)
     await update.message.reply_text(
-        "👋 Добро пожаловать в FELIKS RUSSIA DONATE!\n\n"
-        "Выбирай транспорт в каталоге, нажми «Заказать ТС» и введи игровой ник.\n"
-        "После одобрения заказа появятся способы оплаты.",
-        reply_markup=main_keyboard()
+        "🎮 Добро пожаловать в FELIKS RUSSIA | DONATE!\n\n"
+        "Выбери нужный раздел в меню ниже.",
+        reply_markup=main_menu()
     )
-
-async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    with db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,)
-        ).fetchall()
-    if not rows:
-        await update.effective_message.reply_text("У тебя пока нет заказов.")
-        return
-    lines = ["📦 Твои последние заказы:"]
-    for row in rows:
-        lines.append(
-            f"#{row['id']} — {row['product']}\n"
-            f"Цена: {row['price_rub']} ₽ / {row['price_stars']} ⭐\n"
-            f"Статус: {row['status']}"
-        )
-    await update.effective_message.reply_text("\n\n".join(lines))
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text.strip()
-    uid = update.effective_user.id
-
-    # Режим добавления фото администратором
-    if context.user_data.get("awaiting_vehicle_photo") is not None:
-        await update.message.reply_text("Отправь именно фотографию транспорта, не текст.")
-        return
-
-    if message_text == "🚘 Каталог ТС":
-        await show_catalog(update.effective_chat.id, context)
-        return
-    if message_text == "📦 Мои заказы":
-        await my_orders(update, context)
-        return
-    if message_text == "🎁 Скидки":
-        await update.message.reply_text(
-            "🎁 Есть скидки!\nПо вопросам скидок: @qelzee",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("Связаться по скидкам", url=DISCOUNT_URL)
-            ]])
-        )
-        return
-    if message_text == "ℹ️ Помощь":
-        await update.message.reply_text(
-            "1. Открой каталог и выбери ТС.\n"
-            "2. Нажми «Заказать ТС» и введи игровой ник.\n"
-            "3. Дождись одобрения администратора.\n"
-            "4. Выбери способ оплаты.\n\n"
-            "Оплата картой пока в разработке. Оплату звёздами и БС согласовывай с владельцем @crmp_feliks.",
-            reply_markup=main_keyboard()
-        )
-        return
-
-    state = context.user_data.get("state")
-    if state and state.get("step") == "nickname":
-        nickname = message_text
-        if len(nickname) > 40:
-            await update.message.reply_text("Ник слишком длинный. Введи ник до 40 символов.")
-            return
-        product = state["product"]
-        rub = state["rub"]
-        stars = state["stars"]
-        with db() as conn:
-            cur = conn.execute(
-                "INSERT INTO orders(user_id, username, nickname, product, price_rub, price_stars, status) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (uid, update.effective_user.username or "", nickname, product, rub, stars, "pending")
-            )
-            order_id = cur.lastrowid
-        context.user_data.pop("state", None)
-        admin_text = (
-            f"🛒 Новый заказ #{order_id}\n"
-            f"Пользователь: @{update.effective_user.username or 'без username'}\n"
-            f"Telegram ID: {uid}\n"
-            f"Игровой ник: {nickname}\n"
-            f"Товар: {product}\n"
-            f"Цена: {rub} ₽ / {stars} ⭐\n"
-            f"Статус: ожидает решения"
-        )
-        if ADMIN_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID, text=admin_text,
-                reply_markup=admin_order_keyboard(order_id)
-            )
-        await update.message.reply_text(
-            f"📦 Заказ #{order_id} создан!\n"
-            f"Товар: {product}\nИгровой ник: {nickname}\n"
-            f"Стоимость: {rub} ₽ / {stars} ⭐\n\n"
-            "Ожидай решения администратора. Пока заказ не одобрен, оплачивать его не нужно.",
-            reply_markup=main_keyboard()
-        )
-        return
-
-    await update.message.reply_text("Выбери действие в меню:", reply_markup=main_keyboard())
-
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    # Фото от владельца сохраняется как фото карточки выбранного ТС.
-    index = context.user_data.get("awaiting_vehicle_photo")
-    if index is not None:
-        if uid != ADMIN_ID:
-            await update.message.reply_text("Добавлять фото может только администратор.")
-            return
-        file_id = update.message.photo[-1].file_id
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO vehicle_photos(vehicle_index, file_id) VALUES(?, ?) "
-                "ON CONFLICT(vehicle_index) DO UPDATE SET file_id=excluded.file_id",
-                (index, file_id)
-            )
-        context.user_data.pop("awaiting_vehicle_photo", None)
-        await update.message.reply_text(
-            f"✅ Фото сохранено для ТС: {VEHICLES[index][0]}.\n"
-            "Чтобы добавить следующее фото, используй /setphoto."
-        )
-        return
-    await update.message.reply_text(
-        "Чтобы добавить фото карточки, администратор должен сначала использовать /setphoto."
-    )
-
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data or ""
-
-    if data == "catalog":
-        await show_catalog(query.message.chat_id, context)
-        return
-
-    if data.startswith("vehicle:"):
-        index = int(data.split(":")[1])
-        await send_vehicle(query.message.chat_id, context, index)
-        return
-
-    if data.startswith("order:"):
-        index = int(data.split(":")[1])
-        name, rub, stars = VEHICLES[index]
-        context.user_data["state"] = {
-            "step": "nickname", "product": name, "rub": rub, "stars": stars
-        }
-        await query.message.reply_text(
-            f"🛒 Заказ: {name}\n💵 {rub} ₽ / ⭐ {stars}\n\nВведи свой игровой ник:"
-        )
-        return
-
-    if data.startswith("setphoto:"):
-        if query.from_user.id != ADMIN_ID:
-            await query.answer("Нет доступа.", show_alert=True)
-            return
-        index = int(data.split(":")[1])
-        context.user_data["awaiting_vehicle_photo"] = index
-        await query.message.reply_text(
-            f"📸 Теперь отправь фотографию для карточки «{VEHICLES[index][0]}»."
-        )
-        return
-
-    if data.startswith("approve:"):
-        if query.from_user.id != ADMIN_ID:
-            await query.answer("Нет доступа.", show_alert=True)
-            return
-        order_id = int(data.split(":")[1])
-        with db() as conn:
-            conn.execute("UPDATE orders SET status='approved' WHERE id=?", (order_id,))
-            row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        if row:
-            await context.bot.send_message(
-                row["user_id"],
-                f"✅ Заказ #{order_id} одобрен!\n"
-                f"🚘 ТС: {row['product']}\n"
-                f"💵 Цена: {row['price_rub']} ₽\n"
-                f"⭐ Цена: {row['price_stars']} звёзд\n\n"
-                "Выбери способ оплаты:",
-                reply_markup=payment_keyboard(order_id)
-            )
-        await query.edit_message_reply_markup(reply_markup=None)
-        return
-
-    if data.startswith("reject:"):
-        if query.from_user.id != ADMIN_ID:
-            await query.answer("Нет доступа.", show_alert=True)
-            return
-        order_id = int(data.split(":")[1])
-        with db() as conn:
-            row = conn.execute("SELECT user_id FROM orders WHERE id=?", (order_id,)).fetchone()
-            conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
-        if row:
-            await context.bot.send_message(
-                row["user_id"], f"❌ Заказ #{order_id} отклонён администрацией."
-            )
-        await query.edit_message_reply_markup(reply_markup=None)
-        return
-
-    if data.startswith("paycard:"):
-        await query.message.reply_text(
-            "❌ Оплата картой временно недоступна.\nФункция находится в разработке."
-        )
-        return
-
-    if data.startswith("paystars:"):
-        await query.message.reply_text(
-            "⭐ Оплата звёздами\n\n"
-            "Можешь отправить звёзды владельцу или договориться с ним о покупке заказа.\n"
-            "Нажми кнопку ниже, чтобы связаться с владельцем.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("👤 Написать владельцу @crmp_feliks", url=OWNER_URL)
-            ]])
-        )
-        return
-
-    if data.startswith("paybs:"):
-        order_id = int(data.split(":")[1])
-        with db() as conn:
-            row = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        if not row:
-            await query.message.reply_text("Заказ не найден.")
-            return
-        await query.message.reply_text(
-            f"💰 Оплата БС — заказ #{order_id}\n\n"
-            f"🚘 ТС: {row['product']}\n"
-            f"💵 Цена: {row['price_rub']} ₽\n"
-            f"⭐ Цена: {row['price_stars']} звёзд\n"
-            "💰 Цена в БС: нужно согласовать с владельцем.\n\n"
-            "Чтобы купить ТС за БС, напиши владельцу и согласуй стоимость.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("👤 Согласовать БС с владельцем", url=OWNER_URL)
-            ]])
-        )
-        return
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Нет доступа.")
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Нет доступа.")
         return
-    buttons = []
-    for i, (name, _, _) in enumerate(VEHICLES):
-        buttons.append([InlineKeyboardButton(f"📸 {name}", callback_data=f"setphoto:{i}")])
+    context.user_data.pop("action", None)
+    await update.message.reply_text("🛠 Админ-панель:", reply_markup=admin_menu())
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("action", None)
+    context.user_data.pop("product_id", None)
     await update.message.reply_text(
-        "🛠 Админ-панель\n\n"
-        "/orders — последние заказы\n"
-        "/stats — статистика\n"
-        "/setphoto — добавить или заменить фото карточки ТС\n\n"
-        "Нажми /setphoto и выбери ТС, затем отправь фотографию.",
-        reply_markup=InlineKeyboardMarkup(buttons)
+        "Действие отменено. Выбери раздел меню.",
+        reply_markup=main_menu()
     )
 
-async def setphoto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Нет доступа.")
-        return
-    buttons = [
-        [InlineKeyboardButton(f"📸 {name}", callback_data=f"setphoto:{i}")]
-        for i, (name, _, _) in enumerate(VEHICLES)
-    ]
-    await update.message.reply_text(
-        "Выбери ТС, для которого хочешь добавить фото:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    text = (msg.text or "").strip()
+    action = context.user_data.get("action")
 
-async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Нет доступа.")
-        return
-    with db() as conn:
-        rows = conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 20").fetchall()
-    if not rows:
-        await update.message.reply_text("Заказов пока нет.")
-        return
-    lines = ["📋 Последние заказы:"]
-    for row in rows:
-        lines.append(
-            f"#{row['id']} | {row['product']} | {row['nickname']} | "
-            f"{row['price_rub']} ₽ / {row['price_stars']} ⭐ | {row['status']}"
+    # Режим редактирования принимает текст только после явного действия в админке.
+    if action and is_admin(update):
+        if action == "add_name":
+            context.user_data["new_name"] = text
+            context.user_data["action"] = "add_price"
+            await msg.reply_text("Введи цену товара, например 150 ₽.")
+            return
+        if action == "add_price":
+            context.user_data["new_price"] = text
+            context.user_data["action"] = "add_category"
+            await msg.reply_text("Введи категорию: Транспорт, Скины или Вирта.")
+            return
+        if action == "add_category":
+            category = text
+            if category.lower() in ("вирта", "валюта", "игровая валюта"):
+                category = "Вирта"
+            if category.lower() in ("транспорт", "машины", "тс"):
+                category = "Транспорт"
+            if category.lower() in ("скины", "скин"):
+                category = "Скины"
+            with db() as c:
+                c.execute(
+                    "INSERT INTO products(category,name,price) VALUES(?,?,?)",
+                    (category, context.user_data["new_name"],
+                     context.user_data["new_price"])
+                )
+            context.user_data.pop("action", None)
+            await msg.reply_text("✅ Товар добавлен!", reply_markup=admin_menu())
+            return
+
+        if action == "edit_name":
+            with db() as c:
+                c.execute("UPDATE products SET name=? WHERE id=?",
+                          (text, context.user_data["product_id"]))
+            context.user_data.pop("action", None)
+            await msg.reply_text("✅ Название изменено.", reply_markup=admin_menu())
+            return
+        if action == "edit_price":
+            with db() as c:
+                c.execute("UPDATE products SET price=? WHERE id=?",
+                          (text, context.user_data["product_id"]))
+            context.user_data.pop("action", None)
+            await msg.reply_text("✅ Цена изменена.", reply_markup=admin_menu())
+            return
+        if action == "edit_description":
+            with db() as c:
+                c.execute("UPDATE products SET description=? WHERE id=?",
+                          (text, context.user_data["product_id"]))
+            context.user_data.pop("action", None)
+            await msg.reply_text("✅ Описание изменено.", reply_markup=admin_menu())
+            return
+
+    # Кнопки обычного меню работают даже если пользователь ранее отправлял фото.
+    if text in ("/start", "🏠 Главное меню"):
+        await start(update, context)
+    elif text == "🚘 Транспорт":
+        await msg.reply_text("🚘 Выбери транспорт:", reply_markup=product_keyboard("Транспорт"))
+    elif text == "👕 Скины":
+        await msg.reply_text("👕 Выбери скин:", reply_markup=product_keyboard("Скины"))
+    elif text == "💰 Покупка вирты":
+        await msg.reply_text(
+            "💰 Покупка игровой валюты\n\n"
+            "Выбери доступный товар в категории «Вирта». "
+            "Если список пуст, уточни количество и цену у владельца: @crmp_feliks.",
+            reply_markup=product_keyboard("Вирта")
         )
-    await update.message.reply_text("\n".join(lines))
+    elif text == "🎁 Скидки":
+        await msg.reply_text(
+            "🎁 СКИДКИ И НОВОСТИ\n\n"
+            "Здесь публикуется информация о новых товарах, изменениях ассортимента, "
+            "актуальных ценах и специальных предложениях.\n\n"
+            "По вопросам скидок: @qelzee"
+        )
+    elif text == "ℹ️ Помощь":
+        await msg.reply_text(
+            "ℹ️ ПОМОЩЬ — FELIKS RUSSIA | DONATE\n\n"
+            "🚘 Транспорт — просмотр транспорта и оформление заявки.\n"
+            "👕 Скины — выбор скина и оформление заявки.\n"
+            "💰 Покупка вирты — игровая валюта; количество и стоимость уточняются.\n"
+            "🎁 Скидки — новости, новые товары и актуальные цены.\n"
+            "📦 Мои заказы — просмотр твоих заявок.\n\n"
+            "После выбора товара нажми «Оформить заказ». "
+            "Заявка отправится администратору на подтверждение.\n"
+            "Оплата картой может быть недоступна. Не отправляй данные банковской карты в чат.\n\n"
+            "Владелец по вопросам BC/⭐: @crmp_feliks\n"
+            "Скидки: @qelzee\n"
+            "Для отмены текущего действия напиши /cancel."
+        )
+    elif text == "📦 Мои заказы":
+        with db() as c:
+            orders = c.execute(
+                "SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10",
+                (update.effective_user.id,)
+            ).fetchall()
+        if not orders:
+            await msg.reply_text("📦 У тебя пока нет заказов.")
+        else:
+            body = "\n".join(
+                f"#{o['id']} — {o['product']} — {o['status']}" for o in orders
+            )
+            await msg.reply_text("📦 Твои заказы:\n\n" + body)
+    elif text == "/admin":
+        await admin(update, context)
+    elif text == "/cancel":
+        await cancel(update, context)
+    else:
+        await msg.reply_text("Выбери действие кнопками меню.", reply_markup=main_menu())
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Нет доступа.")
+async def product_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        pid = int(q.data.split(":")[1])
+    except (IndexError, ValueError):
         return
-    with db() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-        pending = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
-        approved = conn.execute("SELECT COUNT(*) FROM orders WHERE status='approved'").fetchone()[0]
-        rejected = conn.execute("SELECT COUNT(*) FROM orders WHERE status='rejected'").fetchone()[0]
-    await update.message.reply_text(
-        f"📊 Статистика\nВсего заказов: {total}\n"
-        f"Ожидают решения: {pending}\nОдобрено: {approved}\nОтклонено: {rejected}"
+    with db() as c:
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1", (pid,)).fetchone()
+    if not p:
+        await q.edit_message_text("Этот товар больше недоступен.")
+        return
+    context.user_data["selected_product"] = pid
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 Оформить заказ", callback_data=f"order:{pid}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"back:{p['category']}")]
+    ])
+    caption = (
+        f"📦 {p['name']}\n"
+        f"💵 Цена: {p['price']}\n"
+        f"📝 {p['description'] or 'Описание пока не добавлено.'}"
     )
+    if p["photo"]:
+        try:
+            await q.message.reply_photo(
+                photo=p["photo"], caption=caption, reply_markup=keyboard
+            )
+        except Exception:
+            await q.message.reply_text(caption, reply_markup=keyboard)
+    else:
+        await q.message.reply_text(caption, reply_markup=keyboard)
+
+async def order_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    pid = int(q.data.split(":")[1])
+    with db() as c:
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1", (pid,)).fetchone()
+        if not p:
+            await q.message.reply_text("Товар недоступен.")
+            return
+        u = q.from_user
+        cur = c.execute(
+            "INSERT INTO orders(user_id,username,product) VALUES(?,?,?)",
+            (u.id, u.username or u.full_name, f"{p['name']} — {p['price']}")
+        )
+        order_id = cur.lastrowid
+    await q.message.reply_text(f"✅ Заявка #{order_id} создана. Ожидай подтверждения.")
+    if ADMIN_ID:
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"🛒 Новый заказ #{order_id}\n"
+                f"Товар: {p['name']}\nЦена: {p['price']}\n"
+                f"Пользователь: {q.from_user.full_name} (@{q.from_user.username or 'нет'})",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Подтвердить", callback_data=f"approve:{order_id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")
+                ]])
+            )
+        except Exception:
+            log.exception("Не удалось уведомить администратора")
+
+async def admin_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        await q.message.reply_text("⛔ Нет доступа.")
+        return
+    data = q.data
+
+    if data == "admin:close":
+        await q.edit_message_text("Админ-панель закрыта.")
+        return
+    if data == "admin:products":
+        with db() as c:
+            products = c.execute("SELECT * FROM products ORDER BY id").fetchall()
+        text = "\n".join(
+            f"#{p['id']} [{p['category']}] {p['name']} — {p['price']}"
+            for p in products
+        ) or "Товаров нет."
+        await q.message.reply_text(text, reply_markup=admin_menu())
+        return
+    if data == "admin:add":
+        context.user_data["action"] = "add_name"
+        await q.message.reply_text("Введи название нового товара. /cancel — отмена.")
+        return
+    if data in ("admin:editlist", "admin:photolist", "admin:deletelist"):
+        with db() as c:
+            products = c.execute("SELECT * FROM products ORDER BY id").fetchall()
+        buttons = []
+        for p in products:
+            if data == "admin:editlist":
+                callback = f"edit:{p['id']}"
+            elif data == "admin:photolist":
+                callback = f"photo:{p['id']}"
+            else:
+                callback = f"delete:{p['id']}"
+            buttons.append([InlineKeyboardButton(
+                f"#{p['id']} {p['name']}", callback_data=callback
+            )])
+        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin:home")])
+        await q.message.reply_text("Выбери товар:", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+    if data == "admin:orders":
+        with db() as c:
+            orders = c.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 20").fetchall()
+        text = "\n".join(
+            f"#{o['id']} {o['product']} | {o['status']} | {o['username']}"
+            for o in orders
+        ) or "Заказов пока нет."
+        await q.message.reply_text(text, reply_markup=admin_menu())
+        return
+    if data == "admin:home":
+        await q.message.reply_text("🛠 Админ-панель:", reply_markup=admin_menu())
+        return
+
+    if data.startswith("edit:"):
+        pid = int(data.split(":")[1])
+        context.user_data["product_id"] = pid
+        await q.message.reply_text(
+            "Что изменить?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Название", callback_data="field:name")],
+                [InlineKeyboardButton("Цена", callback_data="field:price")],
+                [InlineKeyboardButton("Описание", callback_data="field:description")],
+                [InlineKeyboardButton("Категория", callback_data="field:category")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="admin:editlist")]
+            ])
+        )
+        return
+    if data.startswith("field:"):
+        field = data.split(":")[1]
+        context.user_data["action"] = "edit_" + field
+        if field == "category":
+            await q.message.reply_text("Введи новую категорию: Транспорт, Скины или Вирта.")
+        else:
+            await q.message.reply_text("Введи новое значение. Для отмены — /cancel.")
+        return
+    if data.startswith("photo:"):
+        pid = int(data.split(":")[1])
+        context.user_data["action"] = "photo"
+        context.user_data["product_id"] = pid
+        await q.message.reply_text("Теперь отправь фотографию этого товара. /cancel — отмена.")
+        return
+    if data.startswith("delete:"):
+        pid = int(data.split(":")[1])
+        with db() as c:
+            c.execute("UPDATE products SET active=0 WHERE id=?", (pid,))
+        await q.message.reply_text("🗑 Товар скрыт из каталога.", reply_markup=admin_menu())
+        return
+    if data.startswith(("approve:", "reject:")):
+        order_id = int(data.split(":")[1])
+        status = "Подтверждён" if data.startswith("approve:") else "Отклонён"
+        with db() as c:
+            order = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+            c.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
+        if order:
+            try:
+                await context.bot.send_message(
+                    int(order["user_id"]), f"Статус заказа #{order_id}: {status}."
+                )
+            except Exception:
+                pass
+        await q.message.reply_text(f"Заказ #{order_id}: {status}.")
+        return
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if context.user_data.get("action") != "photo":
+        return
+    if not update.message.photo:
+        await update.message.reply_text("Нужно отправить фотографию. Или /cancel для отмены.")
+        return
+    pid = context.user_data.get("product_id")
+    photo_id = update.message.photo[-1].file_id
+    with db() as c:
+        c.execute("UPDATE products SET photo=? WHERE id=?", (photo_id, pid))
+    context.user_data.pop("action", None)
+    context.user_data.pop("product_id", None)
+    await update.message.reply_text("✅ Фото карточки обновлено!", reply_markup=admin_menu())
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.exception("Ошибка бота:", exc_info=context.error)
 
 def run_web():
     port = int(os.getenv("PORT", "10000"))
-    web.run(host="0.0.0.0", port=port, use_reloader=False)
+    app_web.run(host="0.0.0.0", port=port)
 
 def main():
     if not TOKEN:
-        raise RuntimeError("Добавь BOT_TOKEN в переменные окружения Render.")
+        raise RuntimeError("Добавь переменную BOT_TOKEN в Environment на Render.")
     if ADMIN_ID == 0:
-        raise RuntimeError("Добавь числовой ADMIN_ID в переменные окружения Render.")
+        raise RuntimeError("Добавь ADMIN_ID — свой числовой Telegram ID — в Environment.")
     init_db()
     Thread(target=run_web, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("setphoto", setphoto_command))
-    app.add_handler(CommandHandler("orders", orders_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.run_polling(drop_pending_updates=False)
+
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CallbackQueryHandler(product_click, pattern=r"^product:\d+$"))
+    application.add_handler(CallbackQueryHandler(order_click, pattern=r"^order:\d+$"))
+    application.add_handler(CallbackQueryHandler(admin_click, pattern=r"^(admin:|edit:|field:|photo:|delete:|approve:|reject:)"))
+    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_error_handler(error_handler)
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+                
