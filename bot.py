@@ -784,12 +784,7 @@ async def precheckout_handler(
             return
 
         await query.answer(ok=True)
-        except Exception:
-        logger.exception("Ошибка проверки платежа Stars")
-        await query.answer(
-            ok=False,
-            error_message="Не удалось проверить заказ.",
-        )
+        
 
 
 async def successful_payment_handler(
