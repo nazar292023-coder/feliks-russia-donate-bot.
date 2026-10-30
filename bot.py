@@ -7,21 +7,34 @@ from threading import Thread
 
 from flask import Flask
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton
 )
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
 )
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "donate.db")
-CARD_DETAILS = os.getenv("CARD_DETAILS", "Реквизиты уточняются у владельца.")
+CARD_DETAILS = os.getenv(
+    "CARD_DETAILS",
+    "Реквизиты уточняются у владельца."
+)
 OWNER = "crmp_feliks"
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 log = logging.getLogger(__name__)
 
 app_web = Flask(__name__)
@@ -29,12 +42,16 @@ app_web = Flask(__name__)
 
 @app_web.route("/")
 def home():
-    return "FELIKS RUSSIA DONATE: online"
+    return "FELIKS RUSSIA DONATE: online", 200
 
 
 def run_web():
     port = int(os.getenv("PORT", "10000"))
-    app_web.run(host="0.0.0.0", port=port)
+    app_web.run(
+        host="0.0.0.0",
+        port=port,
+        use_reloader=False
+    )
 
 
 def db():
@@ -69,7 +86,9 @@ def init_db():
 
         columns = {
             row["name"]
-            for row in c.execute("PRAGMA table_info(orders)").fetchall()
+            for row in c.execute(
+                "PRAGMA table_info(orders)"
+            ).fetchall()
         }
 
         if "payment_method" not in columns:
@@ -125,11 +144,14 @@ def is_admin(update):
 
 
 def main_menu():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🚘 Транспорт"), KeyboardButton("👕 Скины")],
-        [KeyboardButton("💰 Покупка вирты"), KeyboardButton("🎁 Скидки")],
-        [KeyboardButton("📦 Мои заказы"), KeyboardButton("ℹ️ Помощь")]
-    ], resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🚘 Транспорт"), KeyboardButton("👕 Скины")],
+            [KeyboardButton("💰 Покупка вирты"), KeyboardButton("🎁 Скидки")],
+            [KeyboardButton("📦 Мои заказы"), KeyboardButton("ℹ️ Помощь")]
+        ],
+        resize_keyboard=True
+    )
 
 
 def admin_menu():
@@ -147,7 +169,11 @@ def admin_menu():
 def product_keyboard(category):
     with db() as c:
         products = c.execute(
-            "SELECT * FROM products WHERE category=? AND active=1 ORDER BY id",
+            """
+            SELECT * FROM products
+            WHERE category=? AND active=1
+            ORDER BY id
+            """,
             (category,)
         ).fetchall()
 
@@ -177,6 +203,7 @@ def get_ruble_amount(price):
 
 async def notify_admin(context, order_id, product, user, method, price):
     if not ADMIN_ID:
+        log.warning("ADMIN_ID не настроен")
         return
 
     keyboard = InlineKeyboardMarkup([[
@@ -186,17 +213,20 @@ async def notify_admin(context, order_id, product, user, method, price):
         )
     ]])
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"🛒 НОВЫЙ ЗАКАЗ #{order_id}\n\n"
-        f"📦 Товар: {product}\n"
-        f"💵 Цена: {price}\n"
-        f"💳 Способ оплаты: {method}\n"
-        f"👤 Игрок: {user.full_name}\n"
-        f"🆔 ID: {user.id}\n"
-        f"Статус: Ожидает оплаты/связи",
-        reply_markup=keyboard
-    )
+    try:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🛒 НОВЫЙ ЗАКАЗ #{order_id}\n\n"
+            f"📦 Товар: {product}\n"
+            f"💵 Цена: {price}\n"
+            f"💳 Способ оплаты: {method}\n"
+            f"👤 Игрок: {user.full_name}\n"
+            f"🆔 ID: {user.id}\n"
+            f"Статус: Ожидает оплаты/связи",
+            reply_markup=keyboard
+        )
+    except Exception:
+        log.exception("Не удалось уведомить администратора")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,11 +322,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action in edit_fields:
             column = edit_fields[action]
+            product_id = context.user_data.get("product_id")
 
             with db() as c:
                 c.execute(
                     f"UPDATE products SET {column}=? WHERE id=?",
-                    (text, context.user_data["product_id"])
+                    (text, product_id)
                 )
 
             context.user_data.pop("action", None)
@@ -361,7 +392,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📦 Мои заказы":
         with db() as c:
             orders = c.execute(
-                "SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10",
+                """
+                SELECT * FROM orders
+                WHERE user_id=?
+                ORDER BY id DESC LIMIT 10
+                """,
                 (update.effective_user.id,)
             ).fetchall()
 
@@ -425,6 +460,7 @@ async def product_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
         except Exception:
+            log.exception("Не удалось отправить фото товара")
             await q.message.reply_text(
                 caption,
                 reply_markup=keyboard
@@ -611,14 +647,6 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else message.document.file_id
     )
 
-    with db() as c:
-        c.execute(
-            "UPDATE orders SET proof_file_id=?,status=? WHERE id=?",
-            (file_id, "Чек отправлен — проверка", order_id)
-        )
-
-    context.user_data.pop("proof_order_id", None)
-
     if not ADMIN_ID:
         await message.reply_text(
             "⚠️ Администратор ещё не настроен. "
@@ -646,8 +674,7 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 Покупатель: {username}\n"
         f"🆔 ID: {order['user_id']}\n"
         "📌 Статус: Чек отправлен — проверка\n\n"
-        "Проверь поступление денег в банковском приложении, "
-        "затем выбери действие."
+        "Проверь поступление денег, затем выбери действие."
     )
 
     try:
@@ -656,17 +683,4 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=ADMIN_ID,
                 photo=file_id,
                 caption=caption,
-                reply_markup=keyboard
-            )
-        else:
-            await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=file_id,
-                caption=caption,
-                reply_markup=keyboard
-            )
-
-        await message.reply_text(
-            f"✅ Чек по заказу #{order_id} отправлен администратору. "
-            "Ожидай проверки."
-    
+                reply_markup=keybo
