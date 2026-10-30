@@ -686,8 +686,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ОБРАБОТКА ЧЕКОВ
 # ==================================
 
-async def
-receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if not user:
