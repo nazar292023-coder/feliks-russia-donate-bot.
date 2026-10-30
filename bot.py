@@ -1,4 +1,4 @@
-hi
+
 import os
 import re
 import sqlite3
@@ -946,8 +946,7 @@ async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("✅ Фото обновлено.")
 
 
-async def main():
-    pass
+
 
 
 def main():
