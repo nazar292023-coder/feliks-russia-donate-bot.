@@ -236,9 +236,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❤️ Спасибо, что выбираешь FELIKS RUSSIA!",
         reply_markup=home_keyboard(update.effective_user.id)
     )
-        reply_markup=home_keyboard(update.effective_user.id)
-    )
-
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
