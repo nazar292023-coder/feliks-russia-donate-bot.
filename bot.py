@@ -13,7 +13,6 @@ from telegram import (
     InlineKeyboardMarkup,
     LabeledPrice,
 )
-
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,7 +39,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-
 logger = logging.getLogger(__name__)
 
 # ==================================
@@ -66,7 +64,7 @@ def run_flask():
 
 
 # ==================================
-# ПОДКЛЮЧЕНИЕ SUPABASE
+# БАЗА ДАННЫХ
 # ==================================
 
 def db():
@@ -82,7 +80,6 @@ def db():
 
 def init_db():
     with db() as conn:
-
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -135,11 +132,7 @@ def register_user(user):
             DO UPDATE SET
                 username = EXCLUDED.username,
                 first_name = EXCLUDED.first_name
-        """, (
-            user.id,
-            user.username,
-            user.first_name,
-        ))
+        """, (user.id, user.username, user.first_name))
 
 
 # ==================================
@@ -148,7 +141,6 @@ def register_user(user):
 
 def get_products(category=None):
     with db() as conn:
-
         if category:
             result = conn.execute("""
                 SELECT * FROM products
@@ -189,21 +181,12 @@ def create_order(user_id, product):
     with db() as conn:
         result = conn.execute("""
             INSERT INTO orders (
-                user_id,
-                product_id,
-                product_name,
-                amount,
-                currency,
-                payment_method,
-                status
+                user_id, product_id, product_name,
+                amount, currency, payment_method, status
             )
             VALUES (%s, %s, %s, 0, '', '', 'Создан')
             RETURNING id
-        """, (
-            user_id,
-            product["id"],
-            product["name"],
-        )).fetchone()
+        """, (user_id, product["id"], product["name"])).fetchone()
 
         return result["id"]
 
@@ -225,7 +208,8 @@ def save_receipt(order_id, file_id):
                 status = 'Чек отправлен'
             WHERE id = %s
         """, (file_id, order_id))
-      
+
+
 # ==================================
 # КЛАВИАТУРЫ
 # ==================================
@@ -263,13 +247,20 @@ def payment_keyboard(order_id):
     ])
 
 
+def admin_order_keyboard(order_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{order_id}")],
+        [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")],
+        [InlineKeyboardButton("⬅️ Заказы", callback_data="admin_orders")],
+    ])
+
+
 # ==================================
-# СТАРТ
+# СТАРТ И ОТМЕНА
 # ==================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    register_user(user)
+    register_user(update.effective_user)
 
     await update.message.reply_text(
         "👋 Добро пожаловать в магазин доната FELIKS RUSSIA!\n\n"
@@ -280,7 +271,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-
     await update.message.reply_text(
         "Действие отменено.",
         reply_markup=main_keyboard(),
@@ -309,7 +299,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================================
-# КАТАЛОГ И ЗАКАЗЫ
+# КАТАЛОГ, ОПЛАТА И АДМИН-КНОПКИ
 # ==================================
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -317,13 +307,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
 
-    # Проверка администратора до обработки админских кнопок
-    if (
+    admin_actions = (
         data.startswith("admin_")
         or data.startswith("approve:")
         or data.startswith("reject:")
         or data.startswith("orderadmin:")
-    ) and user_id != ADMIN_ID:
+    )
+
+    if admin_actions and user_id != ADMIN_ID:
         await query.answer("Нет доступа.", show_alert=True)
         return
 
@@ -405,7 +396,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"Выбран товар: {product['name']}\n"
             f"Заказ №{order_id}\n\n"
-            f"Выбери способ оплаты:",
+            "Выбери способ оплаты:",
             reply_markup=payment_keyboard(order_id),
         )
         return
@@ -417,6 +408,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not order or order["user_id"] != user_id:
             await query.edit_message_text("Заказ не найден.")
+            return
+
+        if order["status"] in ("Оплачен", "Отклонён"):
+            await query.edit_message_text("Этот заказ уже закрыт.")
             return
 
         product = get_product(order["product_id"])
@@ -442,14 +437,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE id = %s
                 """, (amount, order_id))
 
-            context.user_data["receipt_order"] = order_id
+            context.user_data["waiting_receipt"] = order_id
 
             await query.edit_message_text(
                 f"💳 Заказ №{order_id}\n\n"
                 f"Сумма: {amount} ₽\n\n"
                 f"Реквизиты:\n{CARD_DETAILS}\n\n"
-                f"После оплаты отправь фото или файл чека.\n"
-                f"Для отмены: /cancel"
+                "После оплаты отправь фото или файл чека.\n"
+                "Для отмены: /cancel"
             )
             return
 
@@ -470,14 +465,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE id = %s
                 """, (amount, order_id))
 
-            context.user_data["receipt_order"] = order_id
+            context.user_data["waiting_receipt"] = order_id
 
             await query.edit_message_text(
                 f"🪙 Заказ №{order_id}\n\n"
                 f"Сумма: {amount} BC\n\n"
                 f"Реквизиты:\n{BC_DETAILS}\n\n"
-                f"После оплаты отправь фото или файл чека.\n"
-                f"Для отмены: /cancel"
+                "После оплаты отправь фото или файл чека.\n"
+                "Для отмены: /cancel"
             )
             return
 
@@ -543,6 +538,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ----- АДМИН: ЗАКАЗЫ -----
+
     if data == "admin_orders":
         with db() as conn:
             orders = conn.execute("""
@@ -579,12 +576,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Заказ не найден.")
             return
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{order_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")],
-            [InlineKeyboardButton("⬅️ Заказы", callback_data="admin_orders")],
-        ])
-
         await query.edit_message_text(
             f"Заказ №{order_id}\n"
             f"Пользователь: {order['user_id']}\n"
@@ -592,7 +583,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Сумма: {order['amount']} {order['currency']}\n"
             f"Оплата: {order['payment_method']}\n"
             f"Статус: {order['status']}",
-            reply_markup=keyboard,
+            reply_markup=admin_order_keyboard(order_id),
         )
         return
 
@@ -602,6 +593,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not order:
             await query.edit_message_text("Заказ не найден.")
+            return
+
+        if order["status"] in ("Оплачен", "Отклонён"):
+            await query.edit_message_text("Заказ уже закрыт.")
             return
 
         update_order_status(order_id, "Оплачен")
@@ -624,6 +619,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Заказ не найден.")
             return
 
+        if order["status"] == "Оплачен":
+            await query.edit_message_text("Оплаченный заказ нельзя отклонить.")
+            return
+
         update_order_status(order_id, "Отклонён")
 
         await context.bot.send_message(
@@ -635,6 +634,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Заказ №{order_id} отклонён."
         )
         return
+
+    # ----- АДМИН: СТАТИСТИКА -----
 
     if data == "admin_stats":
         with db() as conn:
@@ -664,20 +665,29 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ----- АДМИН: ДОБАВЛЕНИЕ ТОВАРА -----
+
     if data == "admin_add":
         context.user_data["admin_action"] = "add_name"
+        context.user_data["new_product"] = {}
+
         await query.edit_message_text("Введи название товара:")
         return
+
+    # ----- АДМИН: РАССЫЛКА -----
 
     if data == "admin_broadcast":
         context.user_data["admin_action"] = "broadcast"
         await query.edit_message_text("Отправь текст рассылки:")
         return
-      # ==================================
-# ОПЛАТА И ЧЕКИ
+
+
+# ==================================
+# ОБРАБОТКА ЧЕКОВ
 # ==================================
 
-async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def
+receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if not user:
@@ -686,164 +696,159 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = context.user_data.get("waiting_receipt")
 
     if not order_id:
-        return
-
-    file_id = None
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-    elif update.message.document:
-        file_id = update.message.document.file_id
-
-    if not file_id:
-        await update.message.reply_text("Отправь фото или файл с чеком.")
+        await update.message.reply_text(
+            "Сначала выбери заказ и способ оплаты в каталоге."
+        )
         return
 
     order = get_order(order_id)
-
     if not order or order["user_id"] != user.id:
         context.user_data.pop("waiting_receipt", None)
         await update.message.reply_text("Заказ не найден.")
         return
 
-    save_receipt(order_id, file_id)
+    if order["status"] != "Ожидает чек":
+        context.user_data.pop("waiting_receipt", None)
+        await update.message.reply_text("Этот заказ больше не ожидает чек.")
+        return
+        save_receipt(order_id, file_id)
     context.user_data.pop("waiting_receipt", None)
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{order_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")
-        ]
-    ])
-
     caption = (
-        f"🧾 Новый чек\n\n"
-        f"Заказ: #{order_id}\n"
-        f"Пользователь: {user.full_name}\n"
-        f"ID: {user.id}"
+        f"🧾 Чек по заказу №{order_id}\n"
+        f"Пользователь: {user.id}\n"
+        f"Товар: {order['product_name']}\n"
+        f"Сумма: {order['amount']} {order['currency']}\n"
+        f"Способ оплаты: {order['payment_method']}"
     )
+    keyboard = admin_order_keyboard(order_id)
 
-    if update.message.photo:
-        await context.bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=file_id,
-            caption=caption,
-            reply_markup=keyboard
+    try:
+        if update.message.photo:
+            await context.bot.send_photo(
+                chat_id=ADMIN_ID,
+                photo=file_id,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=ADMIN_ID,
+                document=file_id,
+                caption=caption,
+               reply_markup=keyboard,
+            )
+    except Exception:
+        logger.exception("Не удалось отправить чек администратору")
+        await update.message.reply_text(
+            "Не удалось передать чек администратору. Попробуй позже."
         )
-    else:
-        await context.bot.send_document(
-            chat_id=ADMIN_ID,
-            document=file_id,
-            caption=caption,
-            reply_markup=keyboard
-        )
+        return
 
     await update.message.reply_text(
-        "✅ Чек отправлен администратору. Дождись проверки."
+        "✅ Чек отправлен администратору.\n"
+        "Дождись проверки."
     )
-
-
-# ==================================
+    # ==================================
 # TELEGRAM STARS
 # ==================================
 
 async def precheckout_handler(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     query = update.pre_checkout_query
 
-    if not query:
-        return
-
     try:
-        order_id = int(query.invoice_payload)
-        order = get_order(order_id)
-
-        valid = (
-            order is not None
-            and order["user_id"] == query.from_user.id
-            and order["stars"] == query.total_amount
-            and query.currency == "XTR"
-            and order["status"] == "Создан"
-        )
-
-        if not valid:
+        if not query.invoice_payload.startswith("order_"):
             await query.answer(
                 ok=False,
-                error_message="Не удалось проверить заказ. Создай новый заказ."
+                error_message="Неизвестный заказ.",
+        )
+            return
+
+        order_id = int(query.invoice_payload.split("_", 1)[1])
+        order = get_order(order_id)
+
+        if (
+            not order
+            or order["user_id"] != query.from_user.id
+            or order["status"] != "Ожидает оплаты"
+            or order["currency"] != "XTR"
+            or int(order["amount"]) != query.total_amount
+            or query.currency != "XTR"
+        ):
+            await query.answer(
+                ok=False,
+                error_message="Заказ недействителен. Создай новый заказ.",
             )
             return
 
         await query.answer(ok=True)
-
-    except Exception:
-        logging.exception("Ошибка проверки платежа Stars")
+        except Exception:
+        logger.exception("Ошибка проверки платежа Stars")
         await query.answer(
             ok=False,
-            error_message="Ошибка проверки платежа."
+            error_message="Не удалось проверить заказ.",
         )
 
 
 async def successful_payment_handler(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
     payment = update.message.successful_payment
-    user_id = update.effective_user.id
 
     try:
-        order_id = int(payment.invoice_payload)
+        if not payment.invoice_payload.startswith("order_"):
+            return
+
+        order_id = int(payment.invoice_payload.split("_", 1)[1])
         order = get_order(order_id)
 
+        if not order or order["user_id"] != update.effective_user.id:
+            logger.warning("Не найден заказ для платежа Stars: %s", order_id)
+            return
+
         if (
-            not order
-            or order["user_id"] != user_id
-            or order["stars"] != payment.total_amount
-            or payment.currency != "XTR"
-            or order["status"] != "Создан"
+            payment.currency != "XTR"
+            or payment.total_amount != int(order["amount"])
+            or order["currency"] != "XTR"
         ):
-            await update.message.reply_text(
-                "⚠️ Не удалось подтвердить платёж. Обратись в поддержку."
-            )
+            logger.error("Несовпадение суммы или валюты Stars: %s", order_id)
+            return
+
+        if order["status"] == "Оплачен":
             return
 
         update_order_status(order_id, "Оплачен")
 
         await update.message.reply_text(
-            f"✅ Оплата заказа #{order_id} прошла успешно!\n"
-            "Администратор проверит заказ и свяжется с тобой."
+            f"⭐ Оплата заказа №{order_id} прошла успешно!\n"
+            "Администрация получила уведомление."
         )
 
         await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=(
-                f"⭐ Новый оплаченный заказ!\n\n"
-                f"Заказ: #{order_id}\n"
-                f"Пользователь: {user_id}\n"
-                f"Сумма: {payment.total_amount} Stars"
-            )
+            ADMIN_ID,
+            f"⭐ Новый оплаченный заказ Stars!\n"
+            f"Заказ №{order_id}\n"
+            f"Пользователь: {update.effective_user.id}\n"
+            f"Товар: {order['product_name']}\n"
+            f"Сумма: {payment.total_amount} Stars",
         )
 
     except Exception:
-        logging.exception("Ошибка обработки Stars")
-        await update.message.reply_text(
-            "Произошла ошибка. Обратись в поддержку."
-        )
+        logger.exception("Ошибка обработки успешной оплаты Stars")
 
 
 # ==================================
-# АДМИН: ДОБАВЛЕНИЕ ТОВАРА И РАССЫЛКА
+# ТЕКСТОВЫЕ ДЕЙСТВИЯ АДМИНА
 # ==================================
-
 async def admin_text_handler(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-    user = update.effective_user
-    message = update.message
-
-    if not user or user.id != ADMIN_ID or not message:
+    if update.effective_user.id != ADMIN_ID:
         return
 
     action = context.user_data.get("admin_action")
@@ -851,174 +856,174 @@ async def admin_text_handler(
     if not action:
         return
 
-    value = message.text.strip()
+    text = update.message.text.strip()
 
     if action == "broadcast":
-        context.user_data.pop("admin_action", None)
-
         with db() as conn:
             users = conn.execute(
                 "SELECT user_id FROM users"
             ).fetchall()
 
         sent = 0
+        failed = 0
 
-        for item in users:
+        await update.message.reply_text("📢 Начинаю рассылку...")
+
+        for user in users:
             try:
                 await context.bot.send_message(
-                    chat_id=item["user_id"],
-                    text=value
+                    chat_id=user["user_id"],
+                    text=text,
                 )
                 sent += 1
             except Exception:
-                logging.exception(
-                    "Не удалось отправить сообщение пользователю %s",
-                    item["user_id"]
-                )
+                failed += 1
 
-        await message.reply_text(
-            f"📢 Рассылка завершена.\nОтправлено: {sent}"
+        context.user_data.pop("admin_action", None)
+
+        await update.message.reply_text(
+            f"✅ Рассылка завершена.\n"
+            f"Отправлено: {sent}\n"
+            f"Не доставлено: {failed}"
         )
         return
 
+    product = context.user_data.setdefault("new_product", {})
+
     if action == "add_name":
-        context.user_data["product_name"] = value
+        product["name"] = text
         context.user_data["admin_action"] = "add_description"
-        await message.reply_text("Напиши описание товара:")
+        await update.message.reply_text("Введи описание товара:")
         return
 
     if action == "add_description":
-        context.user_data["product_description"] = value
+        product["description"] = text
         context.user_data["admin_action"] = "add_category"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚗 Транспорт", callback_data="addcat:Транспорт")],
-            [InlineKeyboardButton("👕 Скины", callback_data="addcat:Скины")],
-            [InlineKeyboardButton("💰 Вирта", callback_data="addcat:Вирта")]
-        ])
-        await message.reply_text(
-            "Выбери категорию товара:",
-            reply_markup=keyboard
+        await update.message.reply_text(
+            "Введи категорию товара:\n"
+            "Транспорт, Скины или Вирта"
         )
         return
 
+    if action == "add_category":
+        allowed = ["Транспорт", "Скины", "Вирта"]
+
+        if text not in allowed:
+            await update.message.reply_text(
+                "Укажи одну из категорий: Транспорт, Скины или Вирта."
+            )
+            return
+
+        product["category"] = text
+        context.user_data["admin_action"] = "add_card"
+        await update.message.reply_text("Введи цену в рублях:")
+        return
+
     if action == "add_card":
-        context.user_data["product_card"] = value
+        try:
+            price = float(text.replace(",", "."))
+            if price < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Введи корректную цену числом.")
+            return
+
+        product["card_price"] = price
         context.user_data["admin_action"] = "add_bc"
-        await message.reply_text("Укажи цену в BC (числом):")
+        await update.message.reply_text("Введи цену в BC:")
         return
 
     if action == "add_bc":
         try:
-            context.user_data["product_bc"] = int(value)
-            context.user_data["admin_action"] = "add_stars"
-            await message.reply_text("Укажи цену в Telegram Stars (числом):")
+            price = float(text.replace(",", "."))
+            if price < 0:
+                raise ValueError
         except ValueError:
-            await message.reply_text("Введи целое число.")
+            await update.message.reply_text("Введи цену в BC:")
+        return
+        if action == "add_bc":
+        try:
+            price = float(text.replace(",", "."))
+            if price < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Введи корректную цену числом.")
+            return
+
+        product["bc_price"] = price
+        context.user_data["admin_action"] = "add_stars"
+        await update.message.reply_text("Введи цену в Telegram Stars (целое число):")
         return
 
     if action == "add_stars":
         try:
-            stars = int(value)
-
-            if stars < 1:
+            price = int(text)
+            if price < 0:
                 raise ValueError
-
-            name = context.user_data["product_name"]
-            description = context.user_data["product_description"]
-            category = context.user_data["product_category"]
-            card_price = context.user_data["product_card"]
-            bc_price = context.user_data["product_bc"]
-
-            with db() as conn:
-                conn.execute("""
-                    INSERT INTO products
-                    (name, description, category, card_price, bc_price, stars, active)
-                    VALUES (%s, %s, %s, %s, %s, %s, TRUE)
-                """, (
-                    name,
-                    description,
-                    category,
-                    card_price,
-                    bc_price,
-                    stars
-                ))
-
-            context.user_data.clear()
-
-            await message.reply_text(
-                "✅ Товар успешно добавлен в каталог!"
-            )
-
         except ValueError:
-            await message.reply_text(
-                "Укажи корректную цену в Stars — целое число больше нуля."
-            )
-        except Exception:
-            logging.exception("Ошибка добавления товара")
-            await message.reply_text(
-                "Не удалось добавить товар. Проверь настройки базы данных."
-            )
+            await update.message.reply_text(
+                "Введи целое число для цены Stars."
+        )
+            return
 
+        product["stars_price"] = price
+
+        with db() as conn:
+            conn.execute("""
+                INSERT INTO products (
+                    name, description, category,
+                    card_price, bc_price, stars_price, active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, TRUE)
+            """, (
+                product["name"],
+                product["description"],
+                product["category"],
+                product["card_price"],
+                product["bc_price"],
+                product["stars_price"],
+            ))
+
+        context.user_data.pop("admin_action", None)
+        context.user_data.pop("new_product", None)
+
+        await update.message.reply_text(
+            "✅ Товар успешно добавлен в каталог."
+        )
 
 # ==================================
-# ВЫБОР КАТЕГОРИИ НОВОГО ТОВАРА
+# ОШИБКИ
 # ==================================
 
-async def add_category_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != ADMIN_ID:
-        return
-
-    category = query.data.split(":", 1)[1]
-
-    if category not in ("Транспорт", "Скины", "Вирта"):
-        await query.edit_message_text("Неизвестная категория.")
-        return
-
-    context.user_data["product_category"] = category
-    context.user_data["admin_action"] = "add_card"
-
-    await query.edit_message_text(
-        f"Категория: {category}\n"
-        "Теперь укажи цену в гривнах для оплаты картой:"
-    )
+    logger.exception("Ошибка во время обработки обновления:", exc_info=context.error)
 
 
 # ==================================
-# ЗАПУСК БОТА
+# ЗАПУСК
 # ==================================
-
-def main():
+  def main():
     if not BOT_TOKEN:
-        raise RuntimeError("Не задан BOT_TOKEN в переменных Render.")
+        raise RuntimeError("Не установлен BOT_TOKEN")
 
-    if not ADMIN_ID:
-        raise RuntimeError("Не задан ADMIN_ID в переменных Render.")
-
-    if not DATABASE_URL:
-        raise RuntimeError("Не задан DATABASE_URL в переменных Render.")
+    if ADMIN_ID == 0:
+        raise RuntimeError("Не установлен ADMIN_ID")
 
     init_db()
 
     threading.Thread(
         target=run_flask,
-        daemon=True
+        daemon=True,
     ).start()
 
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CommandHandler("admin", admin))
-
-    application.add_handler(
-        CallbackQueryHandler(add_category_handler, pattern=r"^addcat:")
-    )
+    application.add_handler(CommandHandler("admin", admin_command))
 
     application.add_handler(
         PreCheckoutQueryHandler(precheckout_handler)
@@ -1027,7 +1032,7 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.SUCCESSFUL_PAYMENT,
-            successful_payment_handler
+            successful_payment_handler,
         )
     )
 
@@ -1038,22 +1043,24 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.PHOTO | filters.Document.ALL,
-            receipt_handler
+            receipt_handler,
         )
     )
 
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            admin_text_handler
+            admin_text_handler,
         )
     )
 
-    logging.info("FELIKS RUSSIA DONATE запущен.")
+    application.add_error_handler(error_handler)
+
+    logger.info("FELIKS RUSSIA DONATE запущен")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
-      
-  
+            
+
