@@ -1,4 +1,4 @@
-
+hi
 import os
 import re
 import sqlite3
@@ -676,29 +676,314 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 Статус: Чек отправлен — проверка\n\n"
         "Проверь поступление денег, затем выбери действие."
     )
-    try:
+        try:
         if message.photo:
             await context.bot.send_photo(
                 chat_id=ADMIN_ID,
                 photo=file_id,
                 caption=caption,
-                reply_markup=keyboard,
+                reply_markup=keyboard
             )
         else:
             await context.bot.send_document(
                 chat_id=ADMIN_ID,
                 document=file_id,
                 caption=caption,
-                reply_markup=keyboard,
+                reply_markup=keyboard
             )
+
+        with db() as c:
+            c.execute(
+                """
+                UPDATE orders
+                SET status=?, proof_file_id=?
+                WHERE id=?
+                """,
+                ("На проверке", file_id, order_id)
+            )
+
+        context.user_data.pop("proof_order_id", None)
 
         await message.reply_text(
             "✅ Чек отправлен администратору. Ожидай проверки."
         )
 
-    except Exception as e:
-        print(f"Ошибка отправки чека: {e}")
+    except Exception:
+        log.exception("Ошибка отправки чека")
         await message.reply_text(
-            "❌ Не удалось отправить чек. Попробуй позже."
+            "❌ Не удалось отправить чек. Попробуй ещё раз."
         )
-    
+
+
+async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if not is_admin(update):
+        await q.message.reply_text("⛔ Нет доступа.")
+        return
+
+    data = q.data
+
+    if data == "admin:close":
+        await q.message.reply_text("Админ-панель закрыта.")
+        return
+
+    if data == "admin:add":
+        context.user_data["action"] = "add_name"
+        await q.message.reply_text("Введи название товара:")
+        return
+
+    if data == "admin:products":
+        with db() as c:
+            products = c.execute(
+                "SELECT * FROM products WHERE active=1"
+            ).fetchall()
+
+        if not products:
+            await q.message.reply_text("Товаров нет.")
+            return
+
+        result = "\n".join(
+            f"#{p['id']} {p['name']} — {p['price']}"
+            for p in products
+        )
+        await q.message.reply_text("📦 Товары:\n\n" + result)
+        return
+
+    if data == "admin:orders":
+        with db() as c:
+            orders = c.execute(
+                "SELECT * FROM orders ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+
+        if not orders:
+            await q.message.reply_text("Заказов пока нет.")
+            return
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"Заказ #{o['id']} — {o['status']}",
+                callback_data=f"orderinfo:{o['id']}"
+            )]
+            for o in orders
+        ]
+
+        await q.message.reply_text(
+            "📋 Заказы:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data in ("admin:editlist", "admin:photolist", "admin:deletelist"):
+        with db() as c:
+            products = c.execute(
+                "SELECT * FROM products WHERE active=1"
+            ).fetchall()
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"{p['name']} #{p['id']}",
+                callback_data=f"choose:{data.split(':')[1]}:{p['id']}"
+            )]
+            for p in products
+        ]
+
+        if buttons:
+            await q.message.reply_text(
+                "Выбери товар:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            await q.message.reply_text("Товаров нет.")
+        return
+
+    if data.startswith("choose:"):
+        _, action, pid = data.split(":")
+        pid = int(pid)
+
+        if action == "deletelist":
+            with db() as c:
+                c.execute(
+                    "UPDATE products SET active=0 WHERE id=?",
+                    (pid,)
+                )
+            await q.message.reply_text("🗑 Товар удалён.")
+            return
+
+        context.user_data["product_id"] = pid
+
+        if action == "photolist":
+            context.user_data["action"] = "edit_photo"
+            await q.message.reply_text("Отправь новое фото товара.")
+            return
+
+        buttons = [
+            [InlineKeyboardButton("Название", callback_data="field:name")],
+            [InlineKeyboardButton("Цена", callback_data="field:price")],
+            [InlineKeyboardButton("Описание", callback_data="field:description")],
+            [InlineKeyboardButton("Категория", callback_data="field:category")]
+        ]
+
+        await q.message.reply_text(
+            "Что изменить?",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("field:"):
+        field = data.split(":")[1]
+        actions = {
+            "name": "edit_name",
+            "price": "edit_price",
+            "description": "edit_description",
+            "category": "edit_category"
+        }
+
+        if field in actions:
+            context.user_data["action"] = actions[field]
+            await q.message.reply_text("Введи новое значение:")
+        return
+
+
+async def order_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if not is_admin(update):
+        return
+
+    order_id = int(q.data.split(":")[1])
+
+    with db() as c:
+        order = c.execute(
+            "SELECT * FROM orders WHERE id=?",
+            (order_id,)
+        ).fetchone()
+
+    if not order:
+        await q.message.reply_text("Заказ не найден.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"paid:{order_id}")],
+        [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{order_id}")]
+    ])
+
+    await q.message.reply_text(
+        f"Заказ #{order_id}\n"
+        f"Товар: {order['product']}\n"
+        f"Покупатель: {order['username']}\n"
+        f"Статус: {order['status']}",
+        reply_markup=keyboard
+    )
+
+
+async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if not is_admin(update):
+        return
+
+    action, order_id = q.data.split(":")
+    order_id = int(order_id)
+
+    status = (
+        "Оплата подтверждена"
+        if action == "paid"
+        else "Чек отклонён"
+    )
+
+    with db() as c:
+        order = c.execute(
+            "SELECT user_id FROM orders WHERE id=?",
+            (order_id,)
+        ).fetchone()
+
+        if not order:
+            await q.message.reply_text("Заказ не найден.")
+            return
+
+        c.execute(
+            "UPDATE orders SET status=? WHERE id=?",
+            (status, order_id)
+        )
+
+    try:
+        await context.bot.send_message(
+            order["user_id"],
+            f"Заказ #{order_id}: {status}."
+        )
+    except Exception:
+        log.exception("Не удалось уведомить покупателя")
+
+    await q.message.reply_text(f"✅ {status}")
+
+
+async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+
+    if context.user_data.get("action") != "edit_photo":
+        return
+
+    if not update.message.photo:
+        return
+
+    pid = context.user_data.get("product_id")
+    file_id = update.message.photo[-1].file_id
+
+    with db() as c:
+        c.execute(
+            "UPDATE products SET photo=? WHERE id=?",
+            (file_id, pid)
+        )
+
+    context.user_data.pop("action", None)
+    context.user_data.pop("product_id", None)
+
+    await update.message.reply_text("✅ Фото обновлено.")
+
+
+async def main():
+    pass
+
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("Не задан BOT_TOKEN в Render.")
+
+    init_db()
+    Thread(target=run_web, daemon=True).start()
+
+    application = Application.builder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("cancel", cancel))
+
+    application.add_handler(CallbackQueryHandler(admin_callbacks, pattern=r"^(admin:|choose:|field:)"))
+    application.add_handler(CallbackQueryHandler(order_info, pattern=r"^orderinfo:"))
+    application.add_handler(CallbackQueryHandler(order_action, pattern=r"^(paid|reject):"))
+    application.add_handler(CallbackQueryHandler(product_click, pattern=r"^product:"))
+    application.add_handler(CallbackQueryHandler(order_click, pattern=r"^order:"))
+    application.add_handler(CallbackQueryHandler(back_click, pattern=r"^back:"))
+    application.add_handler(CallbackQueryHandler(payment_click, pattern=r"^(paycard|paybc|paystars):"))
+
+    application.add_handler(
+        MessageHandler(filters.PHOTO & filters.User(user_id=ADMIN_ID), admin_photo_handler)
+    )
+    application.add_handler(
+        MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, proof_handler)
+    )
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
+    )
+
+    log.info("FELIKS RUSSIA DONATE запущен.")
+    application.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
