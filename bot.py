@@ -1,22 +1,18 @@
-
 import os
 import sqlite3
 import logging
 from datetime import datetime
-
-from flask import Flask
 from threading import Thread
 
+from flask import Flask
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    LabeledPrice
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
+    MessageHandler, PreCheckoutQueryHandler,
+    ContextTypes, filters
 )
-
-# ================= НАСТРОЙКИ =================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -24,26 +20,20 @@ CARD_DETAILS = os.getenv("CARD_DETAILS", "Реквизиты уточняютс�
 BC_DETAILS = os.getenv("BC_DETAILS", "Уточните оплату BC у администратора.")
 DB_PATH = os.getenv("DB_PATH", "donate.db")
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app_web = Flask(__name__)
+web = Flask(__name__)
 
 
-@app_web.route("/")
+@web.route("/")
 def home():
     return "FELIKS RUSSIA DONATE BOT ONLINE"
 
 
 def keep_web_alive():
-    port = int(os.getenv("PORT", "10000"))
-    app_web.run(host="0.0.0.0", port=port)
+    web.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
 
-
-# ================= БАЗА ДАННЫХ =================
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -65,6 +55,7 @@ def init_db():
                 active INTEGER DEFAULT 1
             )
         """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,17 +67,54 @@ def init_db():
                 amount TEXT DEFAULT '',
                 status TEXT DEFAULT 'Ожидает оплаты',
                 proof_file_id TEXT DEFAULT '',
+                proof_type TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             )
         """)
 
+        columns = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(products)"
+            ).fetchall()
+        }
+        if "active" not in columns:
+            conn.execute(
+                "ALTER TABLE products ADD COLUMN active INTEGER DEFAULT 1"
+            )
 
-def get_product(product_id):
+        columns = {
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(orders)"
+            ).fetchall()
+        }
+        migrations = {
+            "username": "TEXT DEFAULT ''",
+            "product_id": "INTEGER",
+            "payment_method": "TEXT DEFAULT ''",
+            "amount": "TEXT DEFAULT ''",
+            "status": "TEXT DEFAULT 'Ожидает оплаты'",
+            "proof_file_id": "TEXT DEFAULT ''",
+            "proof_type": "TEXT DEFAULT ''",
+            "created_at": "TEXT DEFAULT ''"
+        }
+
+        for name, definition in migrations.items():
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE orders ADD COLUMN {name} {definition}"
+                )
+
+
+def is_admin(user_id):
+    return ADMIN_ID != 0 and user_id == ADMIN_ID
+
+
+def get_product(product_id, active_only=True):
     with db() as conn:
-        return conn.execute(
-            "SELECT * FROM products WHERE id=? AND active=1",
-            (product_id,)
-        ).fetchone()
+        sql = "SELECT * FROM products WHERE id=?"
+        if active_only:
+            sql += " AND active=1"
+        return conn.execute(sql, (product_id,)).fetchone()
 
 
 def create_order(user, product, method, amount):
@@ -109,10 +137,6 @@ def create_order(user, product, method, amount):
         return cur.lastrowid
 
 
-def is_admin(user_id):
-    return ADMIN_ID != 0 and user_id == ADMIN_ID
-
-
 # ================= КЛАВИАТУРЫ =================
 
 def main_keyboard():
@@ -132,12 +156,62 @@ def category_keyboard():
     ])
 
 
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить товар", callback_data="admin:add")],
+        [InlineKeyboardButton("📋 Управление товарами", callback_data="admin:products")],
+        [InlineKeyboardButton("📦 Управление заказами", callback_data="admin:orders")]
+    ])
+
+
+def product_manage_keyboard(pid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Название", callback_data=f"edit:{pid}:name")],
+        [InlineKeyboardButton("✏️ Описание", callback_data=f"edit:{pid}:description")],
+        [InlineKeyboardButton("💳 Цена", callback_data=f"edit:{pid}:price")],
+        [InlineKeyboardButton("💰 Цена BC", callback_data=f"edit:{pid}:bc_price")],
+        [InlineKeyboardButton("⭐ Цена Stars", callback_data=f"edit:{pid}:stars_price")],
+        [InlineKeyboardButton("📂 Категория", callback_data=f"editcat:{pid}")],
+        [InlineKeyboardButton("🗑 Удалить товар", callback_data=f"delete:{pid}")],
+        [InlineKeyboardButton("⬅️ К товарам", callback_data="admin:products")]
+    ])
+
+
+def order_keyboard(order):
+    rows = []
+
+    if order["proof_file_id"]:
+        rows.append([
+            InlineKeyboardButton(
+                "🧾 Посмотреть чек",
+                callback_data=f"proof:{order['id']}"
+            )
+        ])
+
+    if order["status"] not in ("Оплачено", "Отклонено"):
+        rows.append([
+            InlineKeyboardButton(
+                "✅ Подтвердить",
+                callback_data=f"order:paid:{order['id']}"
+            ),
+            InlineKeyboardButton(
+                "❌ Отклонить",
+                callback_data=f"order:reject:{order['id']}"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton("⬅️ К заказам", callback_data="admin:orders")
+    ])
+
+    return InlineKeyboardMarkup(rows)
+
+
 # ================= КОМАНДЫ =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Добро пожаловать в магазин FELIKS RUSSIA DONATE!\n\n"
-        "Выберите нужный раздел:",
+        "👋 Добро пожаловать в магазин FELIKS RUSSIA DONATE!",
         reply_markup=main_keyboard()
     )
 
@@ -146,12 +220,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Добавить товар", callback_data="admin:add")],
-        [InlineKeyboardButton("📋 Список товаров", callback_data="admin:products")],
-        [InlineKeyboardButton("📦 Последние заказы", callback_data="admin:orders")]
-    ])
-    await update.message.reply_text("⚙️ Панель администратора", reply_markup=keyboard)
+    await update.message.reply_text(
+        "⚙️ Панель администратора",
+        reply_markup=admin_keyboard()
+    )
 
 
 async def addproduct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,9 +232,19 @@ async def addproduct_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data["adding_product"] = {"step": 0}
     await update.message.reply_text(
-        "➕ Добавление товара.\n\n"
         "Напиши категорию: Транспорт, Скины или Вирта."
     )
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for key in (
+        "adding_product",
+        "editing_product",
+        "editing_category_product"
+    ):
+        context.user_data.pop(key, None)
+
+    await update.message.reply_text("Действие отменено.")
 
 
 # ================= CALLBACKS =================
@@ -170,6 +252,7 @@ async def addproduct_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     data = query.data
     user = query.from_user
 
@@ -189,9 +272,10 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("cat:"):
         category = data.split(":", 1)[1]
+
         with db() as conn:
             products = conn.execute(
-                "SELECT * FROM products WHERE category=? AND active=1",
+                "SELECT * FROM products WHERE category=? AND active=1 ORDER BY id",
                 (category,)
             ).fetchall()
 
@@ -202,31 +286,31 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        buttons = []
-        for product in products:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{product['name']} — {product['price']}",
-                    callback_data=f"product:{product['id']}"
-                )
-            ])
-        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="catalog")])
+        buttons = [
+            [InlineKeyboardButton(
+                f"{p['name'][:35]} — {p['price']}",
+                callback_data=f"product:{p['id']}"
+            )]
+            for p in products
+        ]
+
+        buttons.append([
+            InlineKeyboardButton("⬅️ Назад", callback_data="catalog")
+        ])
 
         await query.edit_message_text(
-            f"📂 Категория: {category}",
+            f"📂 {category}",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         return
 
     if data.startswith("product:"):
-        product_id = int(data.split(":")[1])
-        product = get_product(product_id)
+        pid = int(data.split(":")[1])
+        product = get_product(pid)
 
         if not product:
             await query.edit_message_text("Товар больше недоступен.")
             return
-
-        context.user_data["selected_product"] = product_id
 
         text = (
             f"🛍 {product['name']}\n\n"
@@ -237,16 +321,30 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         buttons = [
-            [InlineKeyboardButton("💳 Оплата картой", callback_data=f"pay:card:{product_id}")],
-            [InlineKeyboardButton("💰 Оплата BC", callback_data=f"pay:bc:{product_id}")],
+            [InlineKeyboardButton(
+                "💳 Оплата картой",
+                callback_data=f"pay:card:{pid}"
+            )],
+            [InlineKeyboardButton(
+                "💰 Оплата BC",
+                callback_data=f"pay:bc:{pid}"
+            )]
         ]
 
         if int(product["stars_price"] or 0) > 0:
             buttons.append([
-                InlineKeyboardButton("⭐ Оплата Stars", callback_data=f"pay:stars:{product_id}")
+                InlineKeyboardButton(
+                    "⭐ Оплата Stars",
+                    callback_data=f"pay:stars:{pid}"
+                )
             ])
 
-        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"cat:{product['category']}")])
+        buttons.append([
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"cat:{product['category']}"
+            )
+        ])
 
         await query.edit_message_text(
             text,
@@ -254,61 +352,68 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ОПЛАТА
     if data.startswith("pay:"):
-        _, method, product_id = data.split(":")
-        product = get_product(int(product_id))
+        _, method, pid = data.split(":")
+        product = get_product(int(pid))
 
         if not product:
             await query.edit_message_text("Товар недоступен.")
             return
 
         if method == "card":
-            order_id = create_order(user, product, "Карта", product["price"])
+            oid = create_order(user, product, "Карта", product["price"])
+
             await query.edit_message_text(
-                f"💳 **Оплата картой**\n\n"
-                f"Заказ №{order_id}\n"
-                f"Товар: {product['name']}\n\n"
-                f"Реквизиты для оплаты:\n{CARD_DETAILS}\n\n"
-                "После перевода отправьте сюда фото или файл чека.\n"
-                "Администратор проверит оплату вручную.",
-                parse_mode="Markdown"
+                f"💳 ОПЛАТА КАРТОЙ\n\n"
+                f"Заказ №{oid}\n"
+                f"Товар: {product['name']}\n"
+                f"Сумма: {product['price']}\n\n"
+                f"Реквизиты:\n{CARD_DETAILS}\n\n"
+                "После перевода отправьте фото или файл чека."
             )
             return
 
         if method == "bc":
-            order_id = create_order(user, product, "BC", product["bc_price"])
+            oid = create_order(user, product, "BC", product["bc_price"])
+
             await query.edit_message_text(
-                f"💰 **Оплата BC**\n\n"
-                f"Заказ №{order_id}\n"
-                f"Товар: {product['name']}\n\n"
+                f"💰 ОПЛАТА BC\n\n"
+                f"Заказ №{oid}\n"
+                f"Товар: {product['name']}\n"
+                f"Сумма: {product['bc_price']}\n\n"
                 f"{BC_DETAILS}\n\n"
-                "После оплаты отправьте сюда скриншот подтверждения.\n"
-                "Администратор проверит его вручную.",
-                parse_mode="Markdown"
+                "После оплаты отправьте скриншот."
             )
             return
 
         if method == "stars":
             stars = int(product["stars_price"] or 0)
+
             if stars <= 0:
-                await query.edit_message_text("Оплата Stars для этого товара недоступна.")
+                await query.edit_message_text("Оплата Stars недоступна.")
                 return
 
-            order_id = create_order(user, product, "Telegram Stars", f"{stars} Stars")
+            oid = create_order(
+                user, product, "Telegram Stars", f"{stars} Stars"
+            )
+
             await context.bot.send_invoice(
                 chat_id=user.id,
                 title=product["name"][:32],
-                description=f"Заказ №{order_id}: {product['description'][:200]}",
-                payload=f"feliks_order_{order_id}",
+                description=f"Заказ №{oid}",
+                payload=f"feliks_order_{oid}",
                 provider_token="",
                 currency="XTR",
                 prices=[LabeledPrice(product["name"][:32], stars)]
             )
+
             await query.edit_message_text(
-                f"⭐ Счёт на оплату заказа №{order_id} отправлен отдельным сообщением."
+                f"⭐ Счёт на оплату заказа №{oid} отправлен."
             )
             return
 
+    # МОИ ЗАКАЗЫ
     if data == "myorders":
         with db() as conn:
             orders = conn.execute(
@@ -323,7 +428,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        text = "📦 Ваши заказы:\n\n"
+        text = "📦 ВАШИ ЗАКАЗЫ\n\n"
+
         for order in orders:
             text += (
                 f"Заказ №{order['id']}\n"
@@ -337,17 +443,24 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "help":
         await query.edit_message_text(
-            "Если возникли вопросы по заказу, отправьте сообщение администратору.",
+            "По вопросам заказа обратитесь к администратору.",
             reply_markup=main_keyboard()
         )
         return
 
-    # Админские кнопки
+    # АДМИНКА
     if data.startswith("admin:"):
         if not is_admin(user.id):
             return
 
-        action = data.split(":")[1]
+        action = data.split(":", 1)[1]
+
+        if action == "menu":
+            await query.edit_message_text(
+                "⚙️ Панель администратора",
+                reply_markup=admin_keyboard()
+            )
+            return
 
         if action == "add":
             context.user_data["adding_product"] = {"step": 0}
@@ -363,298 +476,194 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ).fetchall()
 
             if not products:
-                await query.edit_message_text("Товаров пока нет.")
+                await query.edit_message_text(
+                    "Товаров пока нет.",
+                    reply_markup=admin_keyboard()
+                )
                 return
 
-            text = "📋 Товары:\n\n"
+            buttons = []
+
             for p in products:
-                text += f"#{p['id']} — {p['name']} ({p['category']})\n"
-            await query.edit_message_text(text)
+                status = "🟢" if p["active"] else "⚪"
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{status} #{p['id']} {p['name'][:30]}",
+                        callback_data=f"admprod:{p['id']}"
+                    )
+                ])
+
+            buttons.append([
+                InlineKeyboardButton("➕ Добавить товар", callback_data="admin:add")
+            ])
+            buttons.append([
+                InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu")
+            ])
+
+            await query.edit_message_text(
+                "📋 Управление товарами:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
             return
 
         if action == "orders":
             with db() as conn:
                 orders = conn.execute(
-                    "SELECT * FROM orders ORDER BY id DESC LIMIT 15"
+                    "SELECT * FROM orders ORDER BY id DESC LIMIT 20"
                 ).fetchall()
 
             if not orders:
-                await query.edit_message_text("Заказов пока нет.")
+                await query.edit_message_text(
+                    "Заказов пока нет.",
+                    reply_markup=admin_keyboard()
+                )
                 return
 
-            text = "📦 Последние заказы:\n\n"
+            buttons = []
+
             for o in orders:
-                text += (
-                    f"№{o['id']} — {o['product_name']}\n"
-                    f"Пользователь: {o['username']} ({o['user_id']})\n"
-                    f"Оплата: {o['payment_method']}\n"
-                    f"Статус: {o['status']}\n\n"
-                )
-            await query.edit_message_text(text)
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"№{o['id']} · {o['product_name'][:20]} · {o['status'][:15]}",
+                        callback_data=f"admorder:{o['id']}"
+                    )
+                ])
+
+            buttons.append([
+                InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu")
+            ])
+
+            await query.edit_message_text(
+                "📦 Выбери заказ:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
             return
 
-    if data.startswith("order:"):
+    # ВЫБОР ТОВАРА
+    if data.startswith("admprod:"):
         if not is_admin(user.id):
             return
 
-        _, action, order_id = data.split(":")
-        order_id = int(order_id)
+        pid = int(data.split(":")[1])
+        p = get_product(pid, active_only=False)
 
-        new_status = "Оплачено" if action == "paid" else "Отклонено"
-
-        with db() as conn:
-            order = conn.execute(
-                "SELECT * FROM orders WHERE id=?", (order_id,)
-            ).fetchone()
-            if not order:
-                await query.edit_message_text("Заказ не найден.")
-                return
-            conn.execute(
-                "UPDATE orders SET status=? WHERE id=?",
-                (new_status, order_id)
-            )
-
-        try:
-            await context.bot.send_message(
-                chat_id=order["user_id"],
-                text=f"Заказ №{order_id}: {new_status}."
-            )
-        except Exception:
-            pass
-
-        await query.edit_message_caption(
-            caption=f"Заказ №{order_id}: {new_status}."
-        )
-        return
-
-
-# ================= ДОБАВЛЕНИЕ ТОВАРА =================
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if not is_admin(user.id):
-        return
-
-    state = context.user_data.get("adding_product")
-    if not state:
-        return
-
-    value = update.message.text.strip()
-    step = state["step"]
-
-    prompts = [
-        "Напиши название товара.",
-        "Напиши описание товара.",
-        "Напиши цену картой (например: 100 грн).",
-        "Напиши цену BC.",
-        "Напиши цену Stars числом. Если Stars не нужны — напиши 0."
-    ]
-
-    if step == 0:
-        if value not in ["Транспорт", "Скины", "Вирта"]:
-            await update.message.reply_text(
-                "Укажи одну из категорий: Транспорт, Скины или Вирта."
-            )
-            return
-        state["category"] = value
-
-    elif step == 1:
-        state["name"] = value
-
-    elif step == 2:
-        state["description"] = value
-
-    elif step == 3:
-        state["price"] = value
-
-    elif step == 4:
-        state["bc_price"] = value
-
-    elif step == 5:
-        try:
-            stars = int(value)
-            if stars < 0:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text("Введи целое число, например 0 или 50.")
+        if not p:
+            await query.edit_message_text("Товар не найден.")
             return
 
+        text = (
+            f"🛠 ТОВАР №{pid}\n\n"
+            f"Название: {p['name']}\n"
+            f"Категория: {p['category']}\n"
+            f"Описание: {p['description']}\n"
+            f"Цена: {p['price']}\n"
+            f"BC: {p['bc_price']}\n"
+            f"Stars: {p['stars_price']}\n"
+            f"Активен: {'Да' if p['active'] else 'Нет'}"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=product_manage_keyboard(pid)
+        )
+        return
+
+    # РЕДАКТИРОВАНИЕ
+    if data.startswith("edit:"):
+        if not is_admin(user.id):
+            return
+
+        _, pid, field = data.split(":")
+        pid = int(pid)
+
+        if not get_product(pid, active_only=False):
+            await query.edit_message_text("Товар не найден.")
+            return
+
+        context.user_data["editing_product"] = {
+            "product_id": pid,
+            "field": field
+        }
+
+        prompts = {
+            "name": "Введи новое название товара.",
+            "description": "Введи новое описание.",
+            "price": "Введи новую цену картой.",
+            "bc_price": "Введи новую цену BC.",
+            "stars_price": "Введи новое количество Stars числом."
+        }
+
+        await query.edit_message_text(
+            prompts[field] + "\n\nОтмена: /cancel"
+        )
+        return
+
+    if data.startswith("editcat:"):
+        if not is_admin(user.id):
+            return
+
+        pid = int(data.split(":")[1])
+        context.user_data["editing_category_product"] = pid
+
+        await query.edit_message_text(
+            "Выбери новую категорию:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚗 Транспорт", callback_data="setcat:Транспорт")],
+                [InlineKeyboardButton("🎨 Скины", callback_data="setcat:Скины")],
+                [InlineKeyboardButton("💰 Вирта", callback_data="setcat:Вирта")]
+            ])
+        )
+        return
+
+    if data.startswith("setcat:"):
+        if not is_admin(user.id):
+            return
+
+        pid = context.user_data.get("editing_category_product")
+
+        if not pid:
+            await query.edit_message_text("Сессия изменения категории истекла.")
+            return
+
+        category = data.split(":", 1)[1]
+
         with db() as conn:
-            conn.execute("""
-                INSERT INTO products
-                (category, name, description, price, bc_price, stars_price)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                state["category"],
-                state["name"],
-                state["description"],
-                state["price"],
-                state["bc_price"],
-                stars
-            ))
-
-        context.user_data.pop("adding_product", None)
-        await update.message.reply_text("✅ Товар добавлен в каталог.")
-        return
-
-    state["step"] += 1
-    await update.message.reply_text(prompts[state["step"] - 1])
-
-
-# ================= ЧЕКИ =================
-
-async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    with db() as conn:
-        order = conn.execute("""
-            SELECT * FROM orders
-            WHERE user_id=? AND status='Ожидает оплаты'
-            ORDER BY id DESC LIMIT 1
-        """, (user.id,)).fetchone()
-
-    if not order:
-        await update.message.reply_text(
-            "Не найден заказ, ожидающий подтверждения оплаты."
-        )
-        return
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-    elif update.message.document:
-        file_id = update.message.document.file_id
-    else:
-        return
-
-    with db() as conn:
-        conn.execute(
-            "UPDATE orders SET proof_file_id=?, status='Чек отправлен' WHERE id=?",
-            (file_id, order["id"])
-        )
-
-    caption = (
-        f"📥 Новый чек на проверку\n\n"
-        f"Заказ №{order['id']}\n"
-        f"Товар: {order['product_name']}\n"
-        f"Способ оплаты: {order['payment_method']}\n"
-        f"Сумма: {order['amount']}\n"
-        f"Пользователь: {user.full_name}\n"
-        f"ID: {user.id}"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Подтвердить", callback_data=f"order:paid:{order['id']}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"order:reject:{order['id']}")
-        ]
-    ])
-
-    if update.message.photo:
-        await context.bot.send_photo(
-            ADMIN_ID, file_id, caption=caption, reply_markup=keyboard
-        )
-    else:
-        await context.bot.send_document(
-            ADMIN_ID, file_id, caption=caption, reply_markup=keyboard
-        )
-
-    await update.message.reply_text(
-        "✅ Чек отправлен администратору. Ожидайте проверки."
-    )
-
-
-# ================= TELEGRAM STARS =================
-
-async def precheckout_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    await update.pre_checkout_query.answer(ok=True)
-
-
-async def successful_payment_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    payment = update.message.successful_payment
-    payload = payment.invoice_payload
-
-    if not payload.startswith("feliks_order_"):
-        return
-
-    order_id = int(payload.replace("feliks_order_", ""))
-
-    with db() as conn:
-        order = conn.execute(
-            "SELECT * FROM orders WHERE id=?", (order_id,)
-        ).fetchone()
-
-        if order:
             conn.execute(
-                "UPDATE orders SET status='Оплачено' WHERE id=?",
-                (order_id,)
+                "UPDATE products SET category=? WHERE id=?",
+                (category, pid)
             )
 
-    await update.message.reply_text(
-        f"⭐ Оплата заказа №{order_id} успешно получена!"
-    )
+        context.user_data.pop("editing_category_product", None)
 
-    if order:
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"⭐ Получена оплата Stars!\n"
-            f"Заказ №{order_id}\n"
-            f"Товар: {order['product_name']}\n"
-            f"Пользователь: {update.effective_user.id}"
+        await query.edit_message_text(
+            f"✅ Категория изменена: {category}",
+            reply_markup=product_manage_keyboard(pid)
         )
+        return
 
+    # УДАЛЕНИЕ
+    if data.startswith("delete:"):
+        if not is_admin(user.id):
+            return
 
-# ================= ЗАПУСК =================
+        pid = int(data.split(":")[1])
+        p = get_product(pid, active_only=False)
 
-def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("Добавь BOT_TOKEN в Environment на Render.")
+        if not p:
+            await query.edit_message_text("Товар не найден.")
+            return
 
-    if ADMIN_ID == 0:
-        raise RuntimeError("Добавь ADMIN_ID в Environment на Render.")
-
-    init_db()
-
-    Thread(target=keep_web_alive, daemon=True).start()
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", admin_command))
-    application.add_handler(CommandHandler("addproduct", addproduct_command))
-
-    application.add_handler(CallbackQueryHandler(callbacks))
-    application.add_handler(PreCheckoutQueryHandler(precheckout_handler))
-
-    application.add_handler(
-        MessageHandler(
-            filters.SUCCESSFUL_PAYMENT,
-            successful_payment_handler
+        await query.edit_message_text(
+            f"Удалить товар «{p['name']}» из каталога?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Да, удалить", callback_data=f"deleteyes:{pid}")],
+                [InlineKeyboardButton("Отмена", callback_data=f"admprod:{pid}")]
+            ])
         )
-    )
+        return
 
-    application.add_handler(
-        MessageHandler(
-            (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
-            proof_handler
-        )
-    )
+    if data.startswith("deleteyes:"):
+        if not is_admin(user.id):
+            return
 
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_handler
-        )
-    )
-
-    logger.info("FELIKS RUSSIA DONATE BOT STARTED")
-    application.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
-        
+        pid = 
