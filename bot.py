@@ -665,5 +665,3 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("deleteyes:"):
         if not is_admin(user.id):
             return
-
-        pid = 
