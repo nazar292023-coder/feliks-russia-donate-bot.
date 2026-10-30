@@ -654,4 +654,4 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(
                     ADMIN_ID,
                     file_id,
-                    caption=f"🧾 Чек по зак
+                    caption=f"🧾 Чек по заказу #{order_id}",
