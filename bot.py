@@ -226,8 +226,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
 
     await update.message.reply_text(
-        "👋 Добро пожаловать в FELIKS RUSSIA DONATE!\n\n"
-        "Выберите нужный раздел:",
+        await query.edit_message_text(
+    "👋 Добро пожаловать в FELIKS RUSSIA | DONATE!\n\n"
+    "🛒 Выбирай нужный раздел магазина:\n\n"
+    "👕 Скины\n"
+    "🚗 Транспорт\n"
+    "💰 Вирты",
+    reply_markup=home_keyboard(query.from_user.id)
+        )
+ 
         reply_markup=home_keyboard(update.effective_user.id)
     )
 
