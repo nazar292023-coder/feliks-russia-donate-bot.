@@ -3,8 +3,9 @@ import os
 import re
 import sqlite3
 import logging
-from flask import Flask
 from threading import Thread
+
+from flask import Flask
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton
@@ -14,11 +15,10 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters
 )
 
-TOKEN = os.getenv("BOT_TOKEN", "")
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "donate.db")
 CARD_DETAILS = os.getenv("CARD_DETAILS", "Реквизиты уточняются у владельца.")
-
 OWNER = "crmp_feliks"
 
 logging.basicConfig(level=logging.INFO)
@@ -32,8 +32,13 @@ def home():
     return "FELIKS RUSSIA DONATE: online"
 
 
+def run_web():
+    port = int(os.getenv("PORT", "10000"))
+    app_web.run(host="0.0.0.0", port=port)
+
+
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -62,7 +67,6 @@ def init_db():
             )
         """)
 
-        # Дополнительные поля для платежей.
         columns = {
             row["name"]
             for row in c.execute("PRAGMA table_info(orders)").fetchall()
@@ -112,9 +116,10 @@ def init_db():
                 )
 
 
-def is_admin(update: Update) -> bool:
+def is_admin(update):
     return bool(
         update.effective_user
+        and ADMIN_ID
         and update.effective_user.id == ADMIN_ID
     )
 
@@ -159,20 +164,14 @@ def product_keyboard(category):
 
 def payment_keyboard(pid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "💳 Оплата картой", callback_data=f"paycard:{pid}"
-        )],
-        [InlineKeyboardButton(
-            "💎 Оплата BC", callback_data=f"paybc:{pid}"
-        )],
-        [InlineKeyboardButton(
-            "⭐ Оплата звёздами", callback_data=f"paystars:{pid}"
-        )]
+        [InlineKeyboardButton("💳 Оплата картой", callback_data=f"paycard:{pid}")],
+        [InlineKeyboardButton("💎 Оплата BC", callback_data=f"paybc:{pid}")],
+        [InlineKeyboardButton("⭐ Оплата звёздами", callback_data=f"paystars:{pid}")]
     ])
 
 
 def get_ruble_amount(price):
-    match = re.search(r"(\d+)\s*₽", price)
+    match = re.search(r"(\d+)\s*₽", price or "")
     return match.group(1) if match else None
 
 
@@ -180,12 +179,12 @@ async def notify_admin(context, order_id, product, user, method, price):
     if not ADMIN_ID:
         return
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
             "📋 Открыть заказ",
             callback_data=f"orderinfo:{order_id}"
-        )]
-    ])
+        )
+    ]])
 
     await context.bot.send_message(
         ADMIN_ID,
@@ -195,7 +194,7 @@ async def notify_admin(context, order_id, product, user, method, price):
         f"💳 Способ оплаты: {method}\n"
         f"👤 Игрок: {user.full_name}\n"
         f"🆔 ID: {user.id}\n"
-        f"Статус: Ожидает оплаты/проверки",
+        f"Статус: Ожидает оплаты/связи",
         reply_markup=keyboard
     )
 
@@ -222,9 +221,11 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop("action", None)
-    context.user_data.pop("product_id", None)
-    context.user_data.pop("proof_order_id", None)
+    for key in (
+        "action", "product_id", "proof_order_id",
+        "new_name", "new_price"
+    ):
+        context.user_data.pop(key, None)
 
     await update.message.reply_text(
         "Действие отменено. Выбери раздел меню.",
@@ -238,6 +239,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = context.user_data.get("action")
 
     if action and is_admin(update):
+
         if action == "add_name":
             context.user_data["new_name"] = text
             context.user_data["action"] = "add_price"
@@ -253,14 +255,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if action == "add_category":
-            category = text
+            normalized = text.lower()
 
-            if category.lower() in ("вирта", "валюта", "игровая валюта"):
+            if normalized in ("вирта", "валюта", "игровая валюта"):
                 category = "Вирта"
-            elif category.lower() in ("транспорт", "машины", "тс"):
+            elif normalized in ("транспорт", "машины", "тс"):
                 category = "Транспорт"
-            elif category.lower() in ("скины", "скин"):
+            elif normalized in ("скины", "скин"):
                 category = "Скины"
+            else:
+                category = text
 
             with db() as c:
                 c.execute(
@@ -279,109 +283,79 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if action == "edit_name":
+        edit_fields = {
+            "edit_name": "name",
+            "edit_price": "price",
+            "edit_description": "description",
+            "edit_category": "category"
+        }
+
+        if action in edit_fields:
+            column = edit_fields[action]
+
             with db() as c:
                 c.execute(
-                    "UPDATE products SET name=? WHERE id=?",
+                    f"UPDATE products SET {column}=? WHERE id=?",
                     (text, context.user_data["product_id"])
                 )
 
             context.user_data.pop("action", None)
+            context.user_data.pop("product_id", None)
+
             await msg.reply_text(
-                "✅ Название изменено.",
+                "✅ Изменения сохранены.",
                 reply_markup=admin_menu()
             )
             return
 
-        if action == "edit_price":
-            with db() as c:
-                c.execute(
-                    "UPDATE products SET price=? WHERE id=?",
-                    (text, context.user_data["product_id"])
-                )
-
-            context.user_data.pop("action", None)
-            await msg.reply_text(
-                "✅ Цена изменена.",
-                reply_markup=admin_menu()
-            )
-            return
-
-        if action == "edit_description":
-            with db() as c:
-                c.execute(
-                    "UPDATE products SET description=? WHERE id=?",
-                    (text, context.user_data["product_id"])
-                )
-
-            context.user_data.pop("action", None)
-            await msg.reply_text(
-                "✅ Описание изменено.",
-                reply_markup=admin_menu()
-            )
-            return
-
-        if action == "edit_category":
-            with db() as c:
-                c.execute(
-                    "UPDATE products SET category=? WHERE id=?",
-                    (text, context.user_data["product_id"])
-                )
-
-            context.user_data.pop("action", None)
-            await msg.reply_text(
-                "✅ Категория изменена.",
-                reply_markup=admin_menu()
-            )
-            return
-
-    if text in ("/start", "🏠 Главное меню"):
+    if text == "🏠 Главное меню":
         await start(update, context)
 
     elif text == "🚘 Транспорт":
+        keyboard = product_keyboard("Транспорт")
         await msg.reply_text(
-            "🚘 Выбери транспорт:",
-            reply_markup=product_keyboard("Транспорт")
+            "🚘 Выбери транспорт:" if keyboard else "Товаров пока нет.",
+            reply_markup=keyboard
         )
 
     elif text == "👕 Скины":
+        keyboard = product_keyboard("Скины")
         await msg.reply_text(
-            "👕 Выбери скин:",
-            reply_markup=product_keyboard("Скины")
+            "👕 Выбери скин:" if keyboard else "Товаров пока нет.",
+            reply_markup=keyboard
         )
 
     elif text == "💰 Покупка вирты":
+        keyboard = product_keyboard("Вирта")
         await msg.reply_text(
-            "💰 Покупка игровой валюты\n\n"
-            "Выбери доступный товар в категории «Вирта». "
+            "💰 Выбери доступный товар в категории «Вирта». "
             "Если список пуст, уточни количество и цену у владельца: "
             "@crmp_feliks.",
-            reply_markup=product_keyboard("Вирта")
+            reply_markup=keyboard
         )
 
     elif text == "🎁 Скидки":
         await msg.reply_text(
             "🎁 СКИДКИ И НОВОСТИ\n\n"
             "Здесь публикуется информация о новых товарах, "
-            "изменениях ассортимента, актуальных ценах "
-            "и специальных предложениях.\n\n"
-            "По вопросам скидок: @crmp_feliks"
+            "актуальных ценах и специальных предложениях.\n\n"
+            "По вопросам: @crmp_feliks"
         )
 
     elif text == "ℹ️ Помощь":
         await msg.reply_text(
             "ℹ️ ПОМОЩЬ — FELIKS RUSSIA | DONATE\n\n"
-            "🚘 Транспорт — просмотр транспорта и оформление заявки.\n"
-            "👕 Скины — выбор скина и оформление заявки.\n"
-            "💰 Покупка вирты — игровая валюта; количество и стоимость уточняются.\n"
-            "🎁 Скидки — новости, новые товары и актуальные цены.\n"
-            "📦 Мои заказы — просмотр твоих заявок.\n\n"
-            "После выбора товара нажми «Оформить заказ» и выбери способ оплаты.\n"
-            "Чек по оплате картой отправляется администратору на проверку.\n"
-            "Товары выдаются вручную после подтверждения оплаты.\n\n"
-            "Владелец по вопросам BC/⭐: @crmp_feliks\n"
-            "Скидки: @crmp_feliks\n"
-            "Для отмены текущего действия напиши /cancel."
+            "🚘 Транспорт — выбор транспорта.\n"
+            "👕 Скины — выбор скина.\n"
+            "💰 Покупка вирты — игровая валюта.\n"
+            "🎁 Скидки — новости и предложения.\n"
+            "📦 Мои заказы — список заявок.\n\n"
+            "💳 Карта: бот отправит реквизиты. После оплаты "
+            "отправь фото или файл чека.\n"
+            "💎 BC и ⭐: оплата согласовывается с владельцем "
+            "@crmp_feliks.\n\n"
+            "Товар выдаётся вручную после проверки оплаты.\n"
+            "/cancel — отмена действия."
         )
 
     elif text == "📦 Мои заказы":
@@ -399,12 +373,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for o in orders
             )
             await msg.reply_text("📦 Твои заказы:\n\n" + body)
-
-    elif text == "/admin":
-        await admin(update, context)
-
-    elif text == "/cancel":
-        await cancel(update, context)
 
     else:
         await msg.reply_text(
@@ -429,10 +397,8 @@ async def product_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).fetchone()
 
     if not p:
-        await q.edit_message_text("Этот товар больше недоступен.")
+        await q.message.reply_text("Этот товар больше недоступен.")
         return
-
-    context.user_data["selected_product"] = pid
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
@@ -468,6 +434,19 @@ async def product_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption,
             reply_markup=keyboard
         )
+
+
+async def back_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    category = q.data.split(":", 1)[1]
+    keyboard = product_keyboard(category)
+
+    await q.message.reply_text(
+        f"Выбери товар: {category}" if keyboard else "Товаров пока нет.",
+        reply_markup=keyboard
+    )
 
 
 async def order_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -534,7 +513,9 @@ async def payment_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             cur = c.execute(
                 """
-                INSERT INTO orders(user_id,username,product,status,payment_method)
+                INSERT INTO orders(
+                    user_id,username,product,status,payment_method
+                )
                 VALUES(?,?,?,?,?)
                 """,
                 (
@@ -554,16 +535,15 @@ async def payment_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 Товар: {p['name']}\n"
             f"💵 Сумма: {amount} ₽\n\n"
             f"Реквизиты для оплаты:\n{CARD_DETAILS}\n\n"
-            "После оплаты отправь сюда фотографию или файл чека.\n"
-            "Администратор проверит платеж.\n\n"
+            "После оплаты отправь сюда фото или файл чека.\n"
             f"Номер заказа: #{order_id}\n"
+            "Чек будет отправлен администратору на проверку.\n"
             "Для отмены напиши /cancel."
         )
 
-        if ADMIN_ID:
-            await notify_admin(
-                context, order_id, p["name"], user, "Карта", p["price"]
-            )
+        await notify_admin(
+            context, order_id, p["name"], user, "Карта", p["price"]
+        )
 
     elif method in ("paybc", "paystars"):
         payment_name = "BC" if method == "paybc" else "Звёзды"
@@ -571,7 +551,9 @@ async def payment_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             cur = c.execute(
                 """
-                INSERT INTO orders(user_id,username,product,status,payment_method)
+                INSERT INTO orders(
+                    user_id,username,product,status,payment_method
+                )
                 VALUES(?,?,?,?,?)
                 """,
                 (
@@ -585,27 +567,28 @@ async def payment_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order_id = cur.lastrowid
 
         await q.message.reply_text(
-            f"{'💎' if method == 'paybc' else '⭐'} ОПЛАТА {payment_name.upper()}\n\n"
+            f"{'💎' if method == 'paybc' else '⭐'} "
+            f"ОПЛАТА {payment_name.upper()}\n\n"
             f"📦 Товар: {p['name']}\n"
             f"💵 Цена: {p['price']}\n\n"
-            f"Для оформления оплаты свяжись с владельцем: @{OWNER}\n\n"
-            f"Твой номер заказа: #{order_id}\n"
+            f"Для оформления оплаты свяжись с владельцем: @{OWNER}\n"
+            f"Номер заказа: #{order_id}\n"
             "Выдача товара будет после подтверждения оплаты."
         )
 
-        if ADMIN_ID:
-            await notify_admin(
-                context, order_id, p["name"], user, payment_name, p["price"]
-            )
+        await notify_admin(
+            context, order_id, p["name"], user, payment_name, p["price"]
+        )
 
 
 async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order_id = context.user_data.get("proof_order_id")
+    message = update.message
 
-    if not order_id:
+    if not order_id or not message:
         return
 
-    if not update.message.photo and not update.message.document:
+    if not message.photo and not message.document:
         return
 
     with db() as c:
@@ -614,15 +597,19 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (order_id, update.effective_user.id)
         ).fetchone()
 
-    if not order:
+    if not order or order["status"] != "Ожидается чек":
         context.user_data.pop("proof_order_id", None)
-        await update.message.reply_text("Заказ не найден. Начни оформление заново.")
+        await message.reply_text(
+            "Заказ не найден или чек уже отправлен. "
+            "Проверь раздел «Мои заказы»."
+        )
         return
 
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-    else:
-        file_id = update.message.document.file_id
+    file_id = (
+        message.photo[-1].file_id
+        if message.photo
+        else message.document.file_id
+    )
 
     with db() as c:
         c.execute(
@@ -632,26 +619,54 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("proof_order_id", None)
 
-    await update.message.reply_text(
-        f"✅ Чек по заказу #{order_id} отправлен администратору.\n"
-        "Ожидай проверки оплаты."
+    if not ADMIN_ID:
+        await message.reply_text(
+            "⚠️ Администратор ещё не настроен. "
+            "Сообщи владельцу @crmp_feliks."
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✅ Подтвердить оплату",
+            callback_data=f"paid:{order_id}"
+        )],
+        [InlineKeyboardButton(
+            "❌ Отклонить чек",
+            callback_data=f"reject:{order_id}"
+        )]
+    ])
+
+    username = order["username"] or "не указан"
+
+    caption = (
+        f"🧾 ЧЕК ПО ЗАКАЗУ #{order_id}\n\n"
+        f"📦 Товар: {order['product']}\n"
+        "💳 Способ: Карта\n"
+        f"👤 Покупатель: {username}\n"
+        f"🆔 ID: {order['user_id']}\n"
+        "📌 Статус: Чек отправлен — проверка\n\n"
+        "Проверь поступление денег в банковском приложении, "
+        "затем выбери действие."
     )
 
-    if ADMIN_ID:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "✅ Подтвердить оплату",
-                callback_data=f"paid:{order_id}"
-            )],
-            [InlineKeyboardButton(
-                "❌ Отклонить чек",
-                callback_data=f"reject:{order_id}"
-            )]
-        ])
+    try:
+        if message.photo:
+            await context.bot.send_photo(
+                chat_id=ADMIN_ID,
+                photo=file_id,
+                caption=caption,
+                reply_markup=keyboard
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=ADMIN_ID,
+                document=file_id,
+                caption=caption,
+                reply_markup=keyboard
+            )
 
-        try:
-            if update.message.photo:
-                await context.bot.send_photo(
-                    ADMIN_ID,
-                    file_id,
-                    caption=f"🧾 Чек по заказу #{order_id}",
+        await message.reply_text(
+            f"✅ Чек по заказу #{order_id} отправлен администратору. "
+            "Ожидай проверки."
+    
