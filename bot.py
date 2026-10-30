@@ -225,17 +225,17 @@ def back_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
 
-    if data == "home":
-    await query.edit_message_text(
+    await update.message.reply_text(
         "👋 Добро пожаловать в FELIKS RUSSIA | DONATE!\n\n"
-        "🛒 Выбирай нужный раздел магазина:\n\n"
+        "🛒 Здесь ты можешь приобрести товары для своего игрового аккаунта.\n\n"
+        "📦 В нашем магазине доступны:\n\n"
         "👕 Скины\n"
         "🚗 Транспорт\n"
-        "💰 Вирты",
-        reply_markup=home_keyboard(query.from_user.id)
+        "💰 Вирты\n\n"
+        "✨ Выбирай нужную категорию и оформляй покупку!\n\n"
+        "❤️ Спасибо, что выбираешь FELIKS RUSSIA!",
+        reply_markup=home_keyboard(update.effective_user.id)
     )
-        )
- 
         reply_markup=home_keyboard(update.effective_user.id)
     )
 
