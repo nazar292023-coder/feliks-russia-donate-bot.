@@ -676,11 +676,29 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 Статус: Чек отправлен — проверка\n\n"
         "Проверь поступление денег, затем выбери действие."
     )
-
     try:
         if message.photo:
             await context.bot.send_photo(
                 chat_id=ADMIN_ID,
                 photo=file_id,
                 caption=caption,
-                reply_markup=keybo
+                reply_markup=keyboard,
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=ADMIN_ID,
+                document=file_id,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+
+        await message.reply_text(
+            "✅ Чек отправлен администратору. Ожидай проверки."
+        )
+
+    except Exception as e:
+        print(f"Ошибка отправки чека: {e}")
+        await message.reply_text(
+            "❌ Не удалось отправить чек. Попробуй позже."
+        )
+    
